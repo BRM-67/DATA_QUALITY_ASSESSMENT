@@ -1,0 +1,2730 @@
+---
+title: "Device_Comparison"
+date: "`r Sys.Date()`"
+output: html_document
+---
+This is the analysis file of the device comparison (Empatica vs Polar) of physiological data (i.e. HR & HRV) of the study \_\_\_\_\_\_\_. For further information on the study, please refer to the corresponding paper.
+---
+
+# 0. Packages
+
+a)  Download Data Wrangling Packages
+
+```{r data-wrangling-packages,include=FALSE	}
+
+library(readxl) #To import the data
+library(tidyverse) #To prepare the data adequately
+library(magrittr) #To ensure seamless workflow
+library(writexl) #To export data
+library(purrr) #programming tools 
+library(stringr) #wrappers
+
+```
+
+b)  Download Statistics & Analyis Packages
+
+```{r statistics-packages, include=FALSE	}
+
+library(rstatix)#Pipe-Friendly Framework for Basic Statistical Tests 
+library(psych) #A package for personality, psychometric, and psychological research
+library(effsize) #Efficient Effect Size Computation
+library (Hmisc) #Harrell Miscellaneous
+library(jtools) #analysis and presentation of data
+library(knitr) #reporting 
+library(ggcorrplot) #visualization of a correlation matrix
+library(patchwork)
+library(afex) #analysis of factorial experiments 
+library(lme4) #mixed models 
+library(lmerTest) #mixed models
+library(emmeans) #estimated marginal means
+library(performance) #check regression models
+library(easystats)
+
+```
+
+c)  TimeSeries and HR Data Packages
+
+```{r timeseries-packages, include=FALSE	}
+
+library(imputeTS) #timeseries imputation
+library(RHRV) #HRV analysis tool
+library(slider) #sliding window function
+library(pracma) #for imputations (math function package)
+library(hms) #for pretty time of day
+library(lubridate) #parse & manipulate dates 
+library(BlandAltmanLeh) #Bland Altman Plot for Agreement Comparison
+
+```
+
+# 1. Import 
+
+## 1.1 Import: Physiological Data
+
+```{r import-hrv-data}
+
+#Set WD
+setwd("./Preprocessed_Data")
+
+#Preprocessed Dataset Cardio_Comparison 
+Cardio_Comparison <- read_excel("Cardio_Comparison.xlsx")
+Cardio_Comparison$Event_Phase <- factor(
+  Cardio_Comparison$Event_Phase,
+  levels = c("Baseline", "Trials", "Drone"))
+
+
+#Imputed TimeSeries IBI Data 
+
+## Empatica
+Empatica_RR_Imputed <- read_excel("Empatica_RR_Imputed.xlsx")
+Empatica_RR_Imputed$Event_Phase <- factor(
+  Empatica_RR_Imputed$Event_Phase,
+  levels = c("Baseline", "Trials", "Drone"))
+
+## Polar
+Polar_RR_Imputed <- read_excel("Polar_RR_Imputed.xlsx")
+Polar_RR_Imputed$Timestamp <- as_hms(Polar_RR_Imputed$Timestamp)
+Polar_RR_Imputed$Event_Phase <- factor(
+  Polar_RR_Imputed$Event_Phase,
+  levels = c("Baseline", "Trials", "Drone"))
+
+# Imputed TimeSeries HR Data 
+
+## Empatica
+Empatica_HR <- read_excel("Empatica_HR.xlsx")
+Empatica_HR$Event_Phase <- factor(
+  Empatica_HR$Event_Phase,
+  levels = c("Baseline", "Trials", "Drone"))
+
+## Polar
+Polar_HR <- read_excel("Polar_HR.xlsx")
+Polar_HR$Timestamp <- as_hms(Polar_HR$Timestamp)
+Polar_HR$Event_Phase <- factor(
+  Polar_HR$Event_Phase,
+  levels = c("Baseline", "Trials", "Drone"))
+
+## Computed 1-minute HFn Data 
+Empatica_HFn_1min <- read_excel("HFn_1min_empatica.xlsx")
+Polar_HFn_1min <- read_excel("HFn_1min_polar.xlsx")
+
+```
+
+#1.2 Import Socio-Data
+
+```{r import-socio-data}
+
+#Set WD
+setwd("../Supplementary_Inputs")
+
+#Import Complete Datset
+socio <- read_excel("socio.xlsx")
+
+
+## Recode Factors 
+socio$Gender <- dplyr::recode(
+  socio$Gender,
+  `1` = "male",
+  `2` = "female")
+
+```
+
+
+# 2. Sample Analysis
+
+## 2.1 Sample Description 
+
+```{r sample-description}
+
+#Group Distribution
+socio %>% group_by(Group) %>% count()
+
+#Age 
+socio %>% 
+  summarise(Age_Mean = mean(Age, na.rm=T), 
+            Age_SD = sd (Age, na.rm=T),
+            min = min(Age, na.rm = T), 
+            max = max(Age, na.rm = T))
+
+#Gender 
+socio %>% group_by(Gender) %>% count()
+
+```
+
+## 2.1 Sample Size 
+
+```{r sample-size}
+
+#Full Sample Size 
+n_distinct(Cardio_Comparison$ID) #45
+
+## Sample Size for each device
+Cardio_Comparison %>%
+  summarise(
+    N_Empatica = n_distinct(ID[!is.na(RMSSD_Empatica)]),
+    N_Polar    = n_distinct(ID[!is.na(RMSSD_Polar)])
+  )
+
+## Sample Size for IBI-based Analysis
+Cardio_Comparison %>%
+  group_by(ID) %>%
+  summarise(
+    Empatica = any(!is.na(N_RR_Empatica)),
+    Polar    = any(!is.na(N_RR_Polar)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Data = case_when(
+      Empatica & Polar  ~ "Both",
+      Empatica & !Polar ~ "Empatica only",
+      !Empatica & Polar ~ "Polar only",
+      TRUE              ~ "Neither"
+    )
+  )  %>% count(Data)
+
+## Sample Size for HR-based Analysis
+Cardio_Comparison %>%
+  group_by(ID) %>%
+  summarise(
+    Empatica = any(!is.na(HR_Empatica)),
+    Polar    = any(!is.na(HR_Polar)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Data = case_when(
+      Empatica & Polar  ~ "Both",
+      Empatica & !Polar ~ "Empatica only",
+      !Empatica & Polar ~ "Polar only",
+      TRUE              ~ "Neither"
+    )
+  )  %>% count(Data)
+
+```
+
+# 3. Signal Level Analysis
+
+## 3.1 Artifact Rate: Empatica 
+
+### Overall Artifact Rate 
+
+```{r artifact-rate-empatica}
+
+#Total Artifacts 
+Empatica_RR_Imputed %>% 
+  count(Artifact_Flag)
+
+
+#Artifact percentage per participant and event
+artifact_empatica <- Empatica_RR_Imputed %>%
+  group_by(ID, Event_Phase) %>%
+  summarise(
+    n_total = n(),
+    n_artifact = sum(Artifact_Flag == "Artifact", na.rm = TRUE),
+    artifact_percent = (n_artifact / n_total) * 100,
+    .groups = "drop"
+  )
+
+#Mean and SD across participants for each event
+artifact_empatica %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    N = n(),
+    Mean_Artifact_Percent = round(mean(artifact_percent, na.rm = TRUE),2),
+    SD_Artifact_Percent = round(sd(artifact_percent, na.rm = TRUE),2),
+    .groups = "drop"
+  ) |> view()
+
+```
+
+### Artifact Ratio per Recording Chunk
+
+- Standard Time-based Measures: RMSSD, SDNN -> up to 36%
+
+- Frequency-based Measures: LF, HF -> up to 2%
+
+```{r artifact-ratio-empatica}
+
+#Define thresholds
+thresholds <- c(2, 36)
+
+#Compute recording chunks above artifact ratio threshold
+Critical_Summary_Empatica <- artifact_empatica %>%
+  crossing(Threshold = thresholds) %>%
+  mutate(
+    Critical_Value = case_when(
+      artifact_percent > Threshold ~ "Critical",
+      TRUE ~ "OK")) %>%
+  group_by(Threshold, Event_Phase, Critical_Value) %>%
+  summarise( n = n(),
+             .groups = "drop") %>%
+  group_by(Threshold , Event_Phase) %>%
+  mutate(
+    percentage = round(100 * n / sum(n), 2)) %>%
+  ungroup() |> view()
+
+## Visualize
+ggplot(Critical_Summary_Empatica,
+       aes(x = Event_Phase,
+           y = n,
+           fill = Critical_Value)) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_wrap(
+    ~ Threshold,
+    labeller = as_labeller(
+      c(
+        "2" = "Threshold: 2%",
+        "36" = "Threshold: 36%")))  +
+  
+  labs(
+    title = "Empatica: Artifact Ratios Across Thresholds",
+    x = "Event Phase",
+    y = "Number of Observations",
+    fill = "Artifact Status"
+  )  + 
+  theme_minimal()
+
+```
+
+## 3.2 Artifact Rate: Polar RR 
+
+### Overall Artifact Rate 
+
+```{r artifact-rate-polar-rr}
+
+#Total Artifacts 
+Polar_RR_Imputed %>% 
+  count(Artifact_Flag)
+
+#Artifact percentage per participant and event
+artifact_polar_rr <- Polar_RR_Imputed %>%
+  group_by(ID, Event_Phase) %>%
+  summarise(
+    n_total = n(),
+    n_artifact = sum(Artifact_Flag == "Artifact", na.rm = TRUE),
+    artifact_percent = (n_artifact / n_total) * 100,
+    .groups = "drop"
+  )
+
+#Mean and SD across participants for each event
+artifact_polar_rr %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    N = n(),
+    Mean_Artifact_Percent = round(mean(artifact_percent, na.rm = TRUE),2),
+    SD_Artifact_Percent = round(sd(artifact_percent, na.rm = TRUE),2),
+    .groups = "drop"
+  ) |> view()
+
+
+```
+
+### Artifact Ratio per Recording Chunk
+
+```{r artifact-ratio-polar-rr}
+
+#Compute recording chunks above artifact ratio threshold
+Critical_Summary_Polar <- artifact_polar_rr %>%
+  crossing(Threshold = thresholds) %>%
+  mutate(
+    Critical_Value = case_when(
+      artifact_percent > Threshold ~ "Critical",
+      TRUE ~ "OK")) %>%
+  group_by(Threshold, Event_Phase, Critical_Value) %>%
+  summarise( n = n(),
+             .groups = "drop") %>%
+  group_by(Threshold , Event_Phase) %>%
+  mutate(
+    percentage = round(100 * n / sum(n), 2)) %>%
+  ungroup() |> view()
+
+## Visualize 
+ggplot(Critical_Summary_Polar,
+       aes(x = Event_Phase,
+           y = n,
+           fill = Critical_Value)) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_wrap(
+    ~ Threshold,
+    labeller = as_labeller(
+      c(
+        "2" = "Threshold: 2%",
+        "36" = "Threshold: 36%")))  +
+  
+  labs(
+    title = "Polar: Artifact Ratios Across Thresholds",
+    x = "Event Phase",
+    y = "Number of Observations",
+    fill = "Artifact Status"
+  )  + 
+  theme_minimal()
+
+```
+
+## 3.4 N-IBI / N-RR Comparison
+
+```{r ibi-intervall-detection-comparison}
+
+#Plot Count Comparison
+Cardio_Comparison %>%
+  ggplot(aes(
+    x = N_RR_Polar,
+    y = N_RR_Empatica,
+    color = Event_Phase
+  )) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ ID) +
+  labs(
+    title = "IBI Count Comparison",
+    x = "Polar RR Count",
+    y = "Empatica IBI Count"
+  ) +
+  theme_apa()
+
+#Compute RR_Ratio for all Events 
+RR_ratio <- Cardio_Comparison %>%
+  mutate(RR_ratio = N_RR_Empatica /N_RR_Polar) %>% group_by(Event_Phase) %>%  
+  summarise(RR_ratio = round(mean(RR_ratio, na.rm = T),2)) |> view()
+
+
+#Visualize RR_Ratio per Participant
+Cardio_Comparison %>%
+  mutate(
+    RR_ratio = N_RR_Empatica / N_RR_Polar
+  ) %>%
+  ggplot(aes(
+    x = Event_Phase,
+    y = RR_ratio,
+    color = Event_Phase
+  )) +
+  geom_point() +
+  facet_wrap(~ ID) +
+  theme_apa()
+
+
+```
+
+## 3.5 Remove ID03 from Empatica Data due to poor data quality 
+
+```{r set-id03-dead}
+
+#Set Empatica values to NA in Preprocessed Dataset
+empatica_cols_ID03 <- grep("_Empatica", names(Cardio_Comparison), value = TRUE)
+Cardio_Comparison[Cardio_Comparison$ID == "OITC03", 
+                    empatica_cols_ID03] <- NA
+
+#Remove ID03 from Imputed Timeseries Dataset
+Empatica_RR_Imputed <- Empatica_RR_Imputed %>% filter(ID != "OITC03")
+Empatica_HR <- Empatica_HR %>% filter(ID != "OITC03")
+Empatica_HFn_1min <- Empatica_HFn_1min %>% filter(ID != "OITC03")
+
+```
+
+# 4. Index-Level Anaylsis
+
+## 4.1 Split-Half-Reliability: For Empatica
+
+### 4.1.1 Prepare Epochs
+
+#### For Empatica RR
+
+a) Create a new grouping variable: Event_Grouped to group Trial1-Trial3 data 
+b) Separate each Event into 1 minute-epochs
+c) Compute Metrics on 1 minute epochs
+
+```{r prepare-epochs-rr}
+
+#Prepare Dataset
+
+Empatica_RR_Imputed <- Empatica_RR_Imputed %>%
+ 
+  ## Create sequential 1-minute epoch labels within each event
+  group_by(
+    ID,
+    Event_Phase
+  ) %>%
+
+  mutate(
+
+    # seconds elapsed since start of this event
+    elapsed_sec =
+      as.numeric(timestamp) -
+      first(as.numeric(timestamp)),
+
+    # epoch label (1-minute bins)
+    Epoch = floor(elapsed_sec / 60) + 1
+
+  ) %>%
+
+  ungroup()
+
+#Compute Metrics
+Empatica_RR_Epoch_Summary <- Empatica_RR_Imputed %>% 
+  group_by(ID, Event_Phase, Epoch) %>%
+  summarise(
+    
+    # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    
+    # SDNN
+    SDNN = round(sd(EWMA_RR, na.rm = TRUE), 2),
+    
+    # log SDNN
+    lnSDNN = round(log(
+      sd(EWMA_RR, na.rm = TRUE)
+    ), 3),
+    
+    # RMSSD
+    RMSSD = round(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      ),
+      2
+    ),
+    
+    # log RMSSD
+    lnRMSSD = round(log(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      )
+    ), 3),
+    
+    N_RR = n(),
+    
+    .groups = "drop")  %>% 
+  
+  filter (N_RR > 10)
+
+```
+
+#### For Empatica HFn
+
+```{r prepare-epochs-hfn-empatica}
+
+#Prepare Dataset
+
+## Create new grouping variable 
+Empatica_HFn_1min <- Empatica_HFn_1min %>%
+  mutate(
+    Event_Phase = case_when(
+      Event_Epoch %in% c("Trial1", "Trial2", "Trial3", "Video") ~ "Trials",
+      TRUE ~ Event_Epoch) ) 
+
+```
+
+
+#### For Empatica HR
+
+```{r prepare-epochs-hr}
+
+#Prepare Dataset
+
+Empatica_HR_Epoch <- Empatica_HR %>%
+  
+  ## Create sequential 1-minute epoch labels within each event
+  group_by(
+    ID,
+    Event_Phase) %>%
+
+  mutate(
+
+    # seconds elapsed since start of this event
+    elapsed_sec =
+      as.numeric(timestamp) -
+      first(as.numeric(timestamp)),
+
+    # epoch label (1-minute bins)
+    Epoch = floor(elapsed_sec / 60) + 1
+
+  ) %>%
+
+  ungroup()
+
+#Compute Metrics
+Empatica_HR_Epoch_Summary <- Empatica_HR_Epoch %>% 
+  group_by(ID, Event_Phase, Epoch) %>%
+  summarise(
+    
+    # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    
+    # HR
+    Mean_HR= round(mean(HR, na.rm = TRUE)),
+    N_HR = n(),
+
+    .groups = "drop") %>% 
+  
+  filter (N_HR > 10)
+
+```
+
+### 4.1.2 Compute ICC for Split-Half Reliability 
+
+a) Label odd & even epoch in each event 
+b) Compute average logRMSSD for even & odd epochs per event
+c) Comoute agreement between even & odd epochs 
+
+#### For Empatica RMSSD
+
+```{r compute-epochs-icc-empatica-rmssd}
+
+#Compute ICC 
+ICC_SplitHalf_Empatica_RMSSD <- data.frame()
+events <- unique(Empatica_RR_Epoch_Summary$Event_Phase)
+
+for(event in events) {
+
+  # Subset event
+  df_event <- subset(
+    Empatica_RR_Epoch_Summary,
+    Event_Phase == event
+  )
+
+  # Create odd/even split
+  df_event <- df_event %>%
+
+    mutate(
+      Half = ifelse(
+        Epoch %% 2 == 0,
+        "Even",
+        "Odd"
+      )
+    ) %>%
+
+    # Mean lnRMSSD per participant × half
+    group_by(ID, Half) %>%
+
+    summarise(
+      lnRMSSD = mean(
+        lnRMSSD,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+
+    # Wide format: Odd vs Even columns
+    pivot_wider(
+      names_from = Half,
+      values_from = lnRMSSD
+    )
+
+  # Keep complete cases
+  df_event <- df_event[
+    complete.cases(
+      df_event$Odd,
+      df_event$Even
+    ),
+  ]
+
+  # Compute ICC if enough participants
+  if(nrow(df_event) > 2) {
+
+    icc <- psych::ICC(
+      df_event[, c("Odd", "Even")]
+    )
+
+    # Extract ICC(A,1)
+    icc_row <- icc$results[
+  "Single_raters_absolute",
+  ]
+    icc_value <- round(icc_row["ICC"],2)
+    lower_bound <- round(icc_row["lower bound"],2)
+    upper_bound <- round(icc_row["upper bound"],2)
+
+    # Save result
+    ICC_SplitHalf_Empatica_RMSSD <- rbind(
+      ICC_SplitHalf_Empatica_RMSSD,
+      data.frame(
+        Event = event,
+        ICC_A1 = icc_value, 
+        Lower = lower_bound, 
+        Upper = upper_bound
+      )
+    )
+  }
+}
+
+view(ICC_SplitHalf_Empatica_RMSSD)
+
+```
+
+#### For Empatica HFn
+
+```{r compute-epochs-icc-empatica-hfn}
+
+#Compute ICC 
+ICC_SplitHalf_Empatica_HFn <- data.frame()
+
+events <- unique(Empatica_HFn_1min$Event_Phase)
+
+for(event in events) {
+
+  # Subset event
+  df_event <- subset(
+    Empatica_HFn_1min,
+    Event_Phase == event
+  )
+
+  # Create odd/even split based on 1-minute intervals
+  df_event <- df_event %>%
+
+    mutate(
+      Half = ifelse(
+        Minute %% 2 == 0,
+        "Even",
+        "Odd"
+      )
+    ) %>%
+
+    # Mean HFn per participant × half
+    group_by(ID, Half) %>%
+
+    summarise(
+      HRV_HFn = mean(
+        HRV_HFn,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+
+    # Wide format: Odd vs Even columns
+    pivot_wider(
+      names_from = Half,
+      values_from = HRV_HFn
+    )
+
+  # Keep participants with both odd and even halves
+  df_event <- df_event[
+    complete.cases(
+      df_event$Odd,
+      df_event$Even
+    ),
+  ]
+
+  # Compute ICC if enough participants
+  if(nrow(df_event) > 2) {
+
+    icc <- psych::ICC(
+      df_event[, c("Odd", "Even")]
+    )
+
+    # Extract ICC(A,1): single-rater absolute agreement
+    icc_row <- icc$results[
+      "Single_raters_absolute",
+    ]
+
+    icc_value <- round(
+      icc_row["ICC"],
+      2
+    )
+
+    lower_bound <- round(
+      icc_row["lower bound"],
+      2
+    )
+
+    upper_bound <- round(
+      icc_row["upper bound"],
+      2
+    )
+
+    # Save result
+    ICC_SplitHalf_Empatica_HFn <- rbind(
+      ICC_SplitHalf_Empatica_HFn,
+      data.frame(
+        Event = event,
+        ICC_A1 = icc_value,
+        Lower = lower_bound,
+        Upper = upper_bound
+      )
+    )
+  }
+}
+
+View(ICC_SplitHalf_Empatica_HFn)
+
+```
+
+#### For Empatica HR
+
+```{r compute-epochs-icc-empatica-hr}
+
+#Compute ICC 
+ICC_SplitHalf_Empatica_HR <- data.frame()
+events <- unique(Empatica_HR_Epoch_Summary$Event_Phase)
+
+for(event in events) {
+
+  # Subset event
+  df_event <- subset(
+    Empatica_HR_Epoch_Summary,
+    Event_Phase == event
+  )
+
+  # Create odd/even split
+  df_event <- df_event %>%
+
+    mutate(
+      Half = ifelse(
+        Epoch %% 2 == 0,
+        "Even",
+        "Odd"
+      )
+    ) %>%
+
+    # Mean lnRMSSD per participant × half
+    group_by(ID, Half) %>%
+
+    summarise(
+      HR = mean(
+        Mean_HR,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+
+    # Wide format: Odd vs Even columns
+    pivot_wider(
+      names_from = Half,
+      values_from = HR
+    )
+
+  # Keep complete cases
+  df_event <- df_event[
+    complete.cases(
+      df_event$Odd,
+      df_event$Even
+    ),
+  ]
+
+  # Compute ICC if enough participants
+  if(nrow(df_event) > 2) {
+
+    icc <- psych::ICC(
+      df_event[, c("Odd", "Even")]
+    )
+
+    # Extract ICC(A,1)
+    icc_row <- icc$results[
+  "Single_raters_absolute",
+  ]
+    icc_value <- round(icc_row["ICC"],2)
+    lower_bound <- round(icc_row["lower bound"],2)
+    upper_bound <- round(icc_row["upper bound"],2)
+
+    # Save result
+    ICC_SplitHalf_Empatica_HR <- rbind(
+      ICC_SplitHalf_Empatica_HR,
+      data.frame(
+        Event = event,
+        ICC_A1 = icc_value, 
+        Lower = lower_bound, 
+        Upper = upper_bound
+      )
+    )
+  }
+}
+
+view(ICC_SplitHalf_Empatica_HR)
+```
+
+## 4.2. Split-Half-Reliability: For Polar
+
+### 4.2.1 Prepare Epochs
+
+#### For Polar RMSSD
+
+```{r prepare-epochs-polar-rmssd}
+
+#Prepare Dataset
+
+Polar_RR_Imputed <- Polar_RR_Imputed %>%
+  
+  ## Create sequential 1-minute epoch labels within each event
+  group_by(
+    ID,
+    Event_Phase
+  ) %>%
+
+  mutate(
+
+    # seconds elapsed since start of this event
+    elapsed_sec =
+      as.numeric(Timestamp) -
+      first(as.numeric(Timestamp)),
+
+    # epoch label (1-minute bins)
+    Epoch = floor(elapsed_sec / 60) + 1
+
+  ) %>%
+
+  ungroup()
+
+#Compute Metrics
+Polar_RR_Epoch_Summary <- Polar_RR_Imputed %>% 
+  group_by(ID, Event_Phase, Epoch) %>%
+  
+  summarise(
+    
+    # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    
+    # SDNN
+    SDNN = round(sd(EWMA_RR, na.rm = TRUE), 2),
+    
+    # log SDNN
+    lnSDNN = round(log(
+      sd(EWMA_RR, na.rm = TRUE)
+    ), 3),
+    
+    # RMSSD
+    RMSSD = round(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      ),
+      2
+    ),
+    
+    # log RMSSD
+    lnRMSSD = round(log(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      )
+    ), 3),
+    
+    N_RR = n(),
+    
+    .groups = "drop"
+  ) %>% 
+  filter (N_RR > 10)
+```
+
+#### For Polar HFn
+
+```{r prepare-epochs-polar-hfn}
+
+#Prepare Dataset
+
+## Create new grouping variable 
+Polar_HFn_1min <- Polar_HFn_1min %>%
+  mutate(
+    Event_Phase = case_when(
+      Event_Epoch %in% c("Trial1", "Trial2", "Trial3", "Video") ~ "Trials",
+      TRUE ~ Event_Epoch)) 
+
+```
+
+#### For Polar HR
+
+```{r prepare-epochs-polar-hr}
+
+#Prepare Dataset 
+
+Polar_HR_Epoch <- Polar_HR %>%
+  ## Create sequential 1-minute epoch labels within each event
+  group_by(
+    ID,
+    Event_Phase
+  ) %>%
+
+  mutate(
+
+    # seconds elapsed since start of this event
+    elapsed_sec =
+      as.numeric(Timestamp) -
+      first(as.numeric(Timestamp)),
+
+    # epoch label (1-minute bins)
+    Epoch = floor(elapsed_sec / 60) + 1
+
+  ) %>%
+
+  ungroup()
+
+#Compute Metrics
+Polar_HR_Epoch_Summary <- Polar_HR_Epoch %>% 
+  group_by(ID, Event_Phase, Epoch) %>%
+  
+  summarise(
+    
+    # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    
+    # HR
+    Mean_HR= round(mean(HR, na.rm = TRUE)),
+    N_HR = n(),
+
+    .groups = "drop"
+  )   %>%  
+  filter (N_HR > 10)
+```
+
+### 4.2.2 Compute ICC for Split-Half Reliability 
+
+#### For Polar RMSSD
+
+```{r compute-epochs-icc-polar-rmssd}
+
+#Compute ICC 
+ICC_SplitHalf_Polar_RMSSD <- data.frame()
+events <- unique(Polar_RR_Epoch_Summary$Event_Phase)
+
+for(event in events) {
+
+  # Subset event
+  df_event <- subset(
+    Polar_RR_Epoch_Summary,
+    Event_Phase == event
+  )
+
+  # Create odd/even split
+  df_event <- df_event %>%
+
+    mutate(
+      Half = ifelse(
+        Epoch %% 2 == 0,
+        "Even",
+        "Odd"
+      )
+    ) %>%
+
+    # Mean lnRMSSD per participant × half
+    group_by(ID, Half) %>%
+
+    summarise(
+      lnRMSSD = mean(
+        lnRMSSD,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+
+    # Wide format: Odd vs Even columns
+    pivot_wider(
+      names_from = Half,
+      values_from = lnRMSSD
+    )
+
+  # Keep complete cases
+  df_event <- df_event[
+    complete.cases(
+      df_event$Odd,
+      df_event$Even
+    ),
+  ]
+
+  # Compute ICC if enough participants
+  if(nrow(df_event) > 2) {
+
+    icc <- ICC(
+      df_event[, c("Odd", "Even")]
+    )
+
+    # Extract ICC(A,1)
+    icc_row <- icc$results[
+  "Single_raters_absolute",
+  ]
+  icc_value <- round(icc_row["ICC"],2)
+    lower_bound <- round(icc_row["lower bound"],2)
+    upper_bound <- round(icc_row["upper bound"],2)
+
+    # Save result
+    ICC_SplitHalf_Polar_RMSSD <- rbind(
+      ICC_SplitHalf_Polar_RMSSD,
+      data.frame(
+        Event = event,
+        ICC_A1 = icc_value, 
+        Lower = lower_bound, 
+        Upper = upper_bound 
+      )
+    )
+  }
+}
+
+view(ICC_SplitHalf_Polar_RMSSD)
+```
+
+#### For Polar HFn
+
+```{r compute-epochs-icc-polar-hfn}
+
+#Compute ICC 
+ICC_SplitHalf_Polar_HFn <- data.frame()
+
+events <- unique(Polar_HFn_1min$Event_Phase)
+
+for(event in events) {
+
+  # Subset event
+  df_event <- subset(
+    Polar_HFn_1min,
+    Event_Phase == event
+  )
+
+  # Create odd/even split based on 1-minute intervals
+  df_event <- df_event %>%
+
+    mutate(
+      Half = ifelse(
+        Minute %% 2 == 0,
+        "Even",
+        "Odd"
+      )
+    ) %>%
+
+    # Mean HFn per participant × half
+    group_by(ID, Half) %>%
+
+    summarise(
+      HRV_HFn = mean(
+        HRV_HFn,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+
+    # Wide format: Odd vs Even columns
+    pivot_wider(
+      names_from = Half,
+      values_from = HRV_HFn
+    )
+
+  # Keep participants with both odd and even halves
+  df_event <- df_event[
+    complete.cases(
+      df_event$Odd,
+      df_event$Even
+    ),
+  ]
+
+  # Compute ICC if enough participants
+  if(nrow(df_event) > 2) {
+
+    icc <- psych::ICC(
+      df_event[, c("Odd", "Even")]
+    )
+
+    # Extract ICC(A,1): single-rater absolute agreement
+    icc_row <- icc$results[
+      "Single_raters_absolute",
+    ]
+
+    icc_value <- round(
+      icc_row["ICC"],
+      2
+    )
+
+    lower_bound <- round(
+      icc_row["lower bound"],
+      2
+    )
+
+    upper_bound <- round(
+      icc_row["upper bound"],
+      2
+    )
+
+    # Save result
+    ICC_SplitHalf_Polar_HFn <- rbind(
+      ICC_SplitHalf_Polar_HFn,
+      data.frame(
+        Event = event,
+        ICC_A1 = icc_value,
+        Lower = lower_bound,
+        Upper = upper_bound
+      )
+    )
+  }
+}
+
+View(ICC_SplitHalf_Polar_HFn)
+
+```
+
+
+#### For Polar HR
+
+```{r compute-epochs-icc-polar-hr}
+
+#Compute ICC 
+ICC_SplitHalf_Polar_HR <- data.frame()
+events <- unique(Polar_HR_Epoch_Summary$Event_Phase)
+
+for(event in events) {
+
+  # Subset event
+  df_event <- subset(
+    Polar_HR_Epoch_Summary,
+    Event_Phase == event
+  )
+
+  # Create odd/even split
+  df_event <- df_event %>%
+
+    mutate(
+      Half = ifelse(
+        Epoch %% 2 == 0,
+        "Even",
+        "Odd"
+      )
+    ) %>%
+
+    # Mean lnRMSSD per participant × half
+    group_by(ID, Half) %>%
+
+    summarise(
+      HR = mean(
+        Mean_HR,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+
+    # Wide format: Odd vs Even columns
+    pivot_wider(
+      names_from = Half,
+      values_from = HR
+    )
+
+  # Keep complete cases
+  df_event <- df_event[
+    complete.cases(
+      df_event$Odd,
+      df_event$Even
+    ),
+  ]
+
+  # Compute ICC if enough participants
+  if(nrow(df_event) > 2) {
+
+    icc <- ICC(
+      df_event[, c("Odd", "Even")]
+    )
+
+    # Extract ICC(A,1)
+    icc_row <- icc$results[
+  "Single_raters_absolute",
+  ]
+ icc_value <- round(icc_row["ICC"],2)
+    lower_bound <- round(icc_row["lower bound"],2)
+    upper_bound <- round(icc_row["upper bound"],2)
+
+    # Save result
+    ICC_SplitHalf_Polar_HR <- rbind(
+      ICC_SplitHalf_Polar_HR,
+      data.frame(
+        Event = event,
+        ICC_A1 = icc_value, 
+        Lower = lower_bound, 
+        Upper = upper_bound 
+      )
+    )
+  }
+}
+
+view(ICC_SplitHalf_Polar_HR)
+
+```
+
+
+## 4.2 Bland Altman Analysis
+
+### 4.2.1 Preparation 
+
+#### For RMSSD 
+
+```{r compute-hr-bland-altman-stats}
+
+# 0. Set theoretical / acceptable HR limits
+theoretical_lower_rmssd <- -5.6
+theoretical_upper_rmssd <- 5.6
+
+# 1. Prepare paired HR data
+RMSSD_BA <- Cardio_Comparison %>%
+  filter(
+    !is.na(RMSSD_Empatica),
+    !is.na(RMSSD_Polar),
+    !is.na(Event_Phase)
+  ) %>%
+  mutate(
+    # Set facet order
+    Event_Phase = factor(
+      Event_Phase,
+      levels = c("Baseline", "Trials", "Drone")
+  )) %>%
+  mutate(
+    mean_RMSSD = (RMSSD_Empatica + RMSSD_Polar) / 2,
+    diff_RMSSD = RMSSD_Empatica - RMSSD_Polar)
+
+
+# 2. Bland-Altman analysis
+RMSSD_BA_stats <- RMSSD_BA %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    n = n(),
+    
+    # Bland-Altman statistics
+    bias = mean(diff_RMSSD),
+    sd_difference = sd(diff_RMSSD),
+    loa_lower = bias - 1.96 * sd_difference,
+    loa_upper = bias + 1.96 * sd_difference,
+    
+    # Percentage inside theoretical boundaries
+    n_inside = sum(
+      diff_RMSSD >= theoretical_lower_rmssd &
+      diff_RMSSD <= theoretical_upper_rmssd 
+    ),
+    
+    pct_inside = 100 * n_inside / n,
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_label = paste0(
+      round(pct_inside, 0),
+      "% of the data lies inside the boundaries."
+    )
+  )
+
+RMSSD_BA_stats
+
+```
+
+#### For HFN 
+
+```{r compute-hr-bland-altman-stats}
+
+# 0. Set theoretical / acceptable HFn limits
+theoretical_lower_hfn <- -0.04
+theoretical_upper_hfn <-  0.04
+
+# 1. Prepare paired HR data
+HFn_BA <- Cardio_Comparison %>%
+  filter(
+    !is.na(HRV_HFn_Empatica),
+    !is.na(HRV_HFn_Polar),
+    !is.na(Event_Phase)
+  ) %>%
+  mutate(
+    # Set facet order
+    Event_Phase = factor(
+      Event_Phase,
+      levels = c("Baseline", "Trials", "Drone")
+  )) %>%
+  mutate(
+    mean_HFn = (HRV_HFn_Empatica + HRV_HFn_Polar) / 2,
+    diff_HFn = HRV_HFn_Empatica - HRV_HFn_Polar)
+
+
+# 2. Bland-Altman analysis
+HFn_BA_stats <- HFn_BA %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    n = n(),
+    
+    # Bland-Altman statistics
+    bias = mean(diff_HFn),
+    sd_difference = sd(diff_HFn),
+    loa_lower = bias - 1.96 * sd_difference,
+    loa_upper = bias + 1.96 * sd_difference,
+    
+    # Percentage inside theoretical boundaries
+    n_inside = sum(
+      diff_HFn >= theoretical_lower_hfn &
+        diff_HFn <= theoretical_upper_hfn,
+      na.rm = TRUE),
+  
+    pct_inside = 100 * n_inside / n,
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_label = paste0(
+      round(pct_inside, 0),
+      "% of the data lies inside the boundaries."
+    )
+  )
+
+HFn_BA_stats
+
+```
+
+#### For HR 
+
+```{r compute-hr-bland-altman-stats}
+
+# 0. Set theoretical / acceptable HR limits
+theoretical_lower_hr <- -5
+theoretical_upper_hr <-  5
+
+# 1. Prepare paired HR data
+HR_BA <- Cardio_Comparison %>%
+  filter(
+    !is.na(HR_Empatica),
+    !is.na(HR_Polar),
+    !is.na(Event_Phase)
+  ) %>%
+  mutate(
+    # Set facet order
+    Event_Phase = factor(
+      Event_Phase,
+      levels = c("Baseline",  "Trials",  "Drone")
+  )) %>%
+  mutate(
+    mean_HR = (HR_Empatica + HR_Polar) / 2,
+    diff_HR = HR_Empatica - HR_Polar)
+
+
+# 2. Bland-Altman analysis
+HR_BA_stats <- HR_BA %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    n = n(),
+    
+    # Bland-Altman statistics
+    bias = mean(diff_HR),
+    sd_difference = sd(diff_HR),
+    loa_lower = bias - 1.96 * sd_difference,
+    loa_upper = bias + 1.96 * sd_difference,
+    
+    # Percentage inside theoretical boundaries
+    n_inside = sum(
+      diff_HR >= theoretical_lower_hr &
+      diff_HR <= theoretical_upper_hr
+    ),
+    
+    pct_inside = 100 * n_inside / n,
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_label = paste0(
+      round(pct_inside, 0),
+      "% of the data lies inside the boundaries."
+    )
+  )
+
+HR_BA_stats
+
+```
+
+### 4.2.2 Assumptions 
+
+#### For RMSSD
+
+```{r bland-altman-assumptions-rmssd}
+
+## Histogram
+ggplot(RMSSD_BA, aes(x=mean_RMSSD)) + geom_histogram()+ facet_wrap(~Event_Phase) + theme_apa()
+
+
+#Check Normality 
+RMSSD_normality <- RMSSD_BA %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    shapiro_p = shapiro.test(diff_RMSSD)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    facet_label_rmssd = if_else(
+      shapiro_p < .05,
+      paste0(as.character(Event_Phase), "\u2020"),
+      as.character(Event_Phase)
+    )
+  )
+
+#Create Vector to use for labeling plot
+facet_labels_rmssd <- setNames(
+  RMSSD_normality$facet_label_rmssd,
+  RMSSD_normality$Event_Phase
+)
+
+```
+
+#### For HFn 
+
+```{r bland-altman-assumptions-frequency}
+
+## Histogram
+ggplot(HFn_BA, aes(x=mean_HFn)) + geom_histogram()+ facet_wrap(~Event_Phase) + theme_apa()
+
+
+#Check Normality 
+HFn_normality <- HFn_BA %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    shapiro_p = shapiro.test(diff_HFn)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    facet_label_hfn = if_else(
+      shapiro_p < .05,
+      paste0(as.character(Event_Phase), "\u2020"),
+      as.character(Event_Phase)
+    )
+  )
+
+#Create Vector to use for labeling plot
+facet_labels_hfn <- setNames(
+  HFn_normality$facet_label_hfn,
+  HFn_normality$Event_Phase
+)
+
+```
+
+#### For HR
+
+```{r bland-altman-assumptions-hr}
+
+## Histogram
+ggplot(HR_BA, aes(x=mean_HR)) + geom_histogram()+ facet_wrap(~Event_Phase) + theme_apa()
+
+
+#Check Normality 
+HR_normality <- HR_BA %>%
+  group_by(Event_Phase) %>%
+  summarise(
+    shapiro_p = shapiro.test(diff_HR)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    facet_label_hr = ifelse(
+      shapiro_p < .05,
+      paste0(Event_Phase, " †"),
+      Event_Phase
+    )
+  )
+
+HR_normality
+
+#Create Vector to use for labeling plot
+facet_labels_hr <- setNames(
+  HR_normality$facet_label_hr,
+  HR_normality$Event_Phase
+)
+
+```
+
+
+### 4.3 Visualization of Bland-Altman Plots
+
+#### For RMSSD
+
+```{r bland-altman-plots-rmssd}
+
+# Bland-Altman plot by Event_Grouped
+RMSSD_BA_plot <- ggplot(
+  RMSSD_BA,
+  aes(x = mean_RMSSD, y = diff_RMSSD)
+) +
+  
+  # Observations
+  geom_point(
+    alpha = 0.55,
+    size = 2
+  ) +
+  
+    # Mean bias -- PURPLE
+  geom_hline(
+    data = RMSSD_BA_stats,
+    aes(yintercept = bias),
+    inherit.aes = FALSE,
+    color = "#9b59d0",
+    linewidth = 0.8
+  ) +
+  
+
+  # Statistical 95% LoA -- RED
+  geom_hline(
+    data = RMSSD_BA_stats,
+    aes(yintercept = loa_upper),
+    inherit.aes = FALSE,
+    color = "#d9534f",
+    linewidth = 0.8
+  ) +
+  
+  geom_hline(
+    data = RMSSD_BA_stats,
+    aes(yintercept = loa_lower),
+    inherit.aes = FALSE,
+    color = "#d9534f",
+    linewidth = 0.8
+  ) +
+  
+    # Theoretical / acceptable limits -- GREEN
+  geom_hline(
+    yintercept = theoretical_upper_rmssd,
+    color = "#3fae5a",
+    linewidth = 0.9
+  ) +
+  
+  geom_hline(
+    yintercept = theoretical_lower_rmssd,
+    color = "#3fae5a",
+    linewidth = 0.9
+  ) +
+  
+    # Percentage inside theoretical boundaries
+  geom_label(
+    data = RMSSD_BA_stats,
+    aes(
+      x = -Inf,
+      y = -Inf,
+      label = pct_label
+    ),
+    inherit.aes = FALSE,
+    
+    hjust = -0.05,
+    vjust = -0.5,
+    
+    fill = "white", 
+    color = "#3fae5a",      
+    text.colour = "black",
+    size = 5, 
+    
+    label.size = 0.25,
+    label.padding = unit(0.15, "lines"),
+
+  ) +
+  
+     # Separate panel for each event
+facet_wrap(
+  ~ Event_Phase,
+  ncol = 3,
+  labeller = as_labeller(facet_labels_rmssd)
+) +
+
+# Labels & Theme
+labs(
+  title = "RMSSD Agreement by Experimental Event",
+  subtitle = "† Differences are not normally distributed (Shapiro-Wilk p < .05)",
+  x = "Mean RMSSD of Empatica and Polar (ms)",
+  y = "Differemce (Empatica − Polar) (ms)"
+) +
+  
+   theme_apa() +
+  theme(
+    
+    plot.title = element_text(
+      face = "bold",
+      size = 15
+    ),
+    
+    strip.text = element_text(
+      face = "bold",
+      size = 13
+    ),
+    
+    axis.title = element_text(
+      face = "bold", 
+      size = 13
+    ),
+    
+    axis.text = element_text(
+      size = 13
+    )
+  )
+
+
+RMSSD_BA_plot
+
+```
+
+#### For HFn
+
+```{r bland-altman-plots-hfn}
+
+# Bland-Altman plot by Event_Grouped
+HFn_BA_plot <- ggplot(
+  HFn_BA,
+  aes(x = mean_HFn, y = diff_HFn)
+) +
+  
+  # Observations
+  geom_point(
+    alpha = 0.55,
+    size = 2
+  ) +
+  
+    # Mean bias -- PURPLE
+  geom_hline(
+    data = HFn_BA_stats,
+    aes(yintercept = bias),
+    inherit.aes = FALSE,
+    color = "#9b59d0",
+    linewidth = 0.8
+  ) +
+  
+
+  # Statistical 95% LoA -- RED
+  geom_hline(
+    data = HFn_BA_stats,
+    aes(yintercept = loa_upper),
+    inherit.aes = FALSE,
+    color = "#d9534f",
+    linewidth = 0.8
+  ) +
+  
+  geom_hline(
+    data = HFn_BA_stats,
+    aes(yintercept = loa_lower),
+    inherit.aes = FALSE,
+    color = "#d9534f",
+    linewidth = 0.8
+  ) +
+  
+    # Theoretical / acceptable limits -- GREEN
+  geom_hline(
+    yintercept = theoretical_upper_hfn,
+    color = "#3fae5a",
+    linewidth = 0.9
+  ) +
+  
+  geom_hline(
+    yintercept = theoretical_lower_hfn,
+    color = "#3fae5a",
+    linewidth = 0.9
+  ) +
+  
+    # Percentage inside theoretical boundaries
+  geom_label(
+    data = HFn_BA_stats,
+    aes(
+      x = -Inf,
+      y = -Inf,
+      label = pct_label
+    ),
+    inherit.aes = FALSE,
+    
+    hjust = -0.05,
+    vjust = -0.5,
+    
+    fill = "white", 
+    color = "#3fae5a",      
+    text.colour = "black",  
+        size = 5, 
+    
+    label.size = 0.25,
+    label.padding = unit(0.15, "lines"),
+  
+  ) +
+  
+   # Separate panel for each event
+facet_wrap(
+  ~ Event_Phase,scales = "free", 
+  ncol = 3,
+  labeller = as_labeller(facet_labels_hfn)
+) +
+
+# Labels & Theme
+labs(
+  title = "HFn Agreement by Experimental Event",
+  subtitle = "† Differences are not normally distributed (Shapiro-Wilk p < .05)",
+  x = "Mean HFn of Empatica and Polar (n.u.)",
+  y = "Difference (Empatica − Polar) (n.u.)"
+) +
+  
+   theme_apa() +
+  theme(
+    
+    plot.title = element_text(
+      face = "bold",
+      size = 15
+    ),
+    
+    strip.text = element_text(
+      face = "bold",
+      size = 13
+    ),
+    
+    axis.title = element_text(
+      face = "bold", 
+      size = 13
+    ),
+    
+    axis.text = element_text(
+      size = 13
+    )
+  )
+
+
+HFn_BA_plot
+
+#Explore potential Decreasing Overestimation with lower HFn values
+ggplot(HFn_BA, aes(x=mean_HFn, y=diff_HFn)) + geom_point() + geom_smooth(method="lm") + theme_apa()
+cor.test(HFn_BA$mean_HFn, HFn_BA$diff_HFn, method="spearman")
+```
+
+#### For HR 
+
+```{r visualization-bland-altman-ht}
+
+# Bland-Altman plot by Event_Grouped
+HR_BA_plot <- ggplot(
+  HR_BA,
+  aes(x = mean_HR, y = diff_HR)
+) +
+  
+  # Observations
+  geom_point(
+    alpha = 0.55,
+    size = 2
+  ) +
+  
+    # Mean bias -- PURPLE
+  geom_hline(
+    data = HR_BA_stats,
+    aes(yintercept = bias),
+    inherit.aes = FALSE,
+    color = "#9b59d0",
+    linewidth = 0.8
+  ) +
+  
+
+  # Statistical 95% LoA -- RED
+  geom_hline(
+    data = HR_BA_stats,
+    aes(yintercept = loa_upper),
+    inherit.aes = FALSE,
+    color = "#d9534f",
+    linewidth = 0.8
+  ) +
+  
+  geom_hline(
+    data = HR_BA_stats,
+    aes(yintercept = loa_lower),
+    inherit.aes = FALSE,
+    color = "#d9534f",
+    linewidth = 0.8
+  ) +
+  
+    # Theoretical / acceptable limits -- GREEN
+  geom_hline(
+    yintercept = theoretical_upper_hr,
+    color = "#3fae5a",
+    linewidth = 0.9
+  ) +
+  
+  geom_hline(
+    yintercept = theoretical_lower_hr,
+    color = "#3fae5a",
+    linewidth = 0.9
+  ) +
+  
+    # Percentage inside theoretical boundaries
+  geom_label(
+    data = HR_BA_stats,
+    aes(
+      x = -Inf,
+      y = -Inf,
+      label = pct_label
+    ),
+    inherit.aes = FALSE,
+    
+    hjust = -0.05,
+    vjust = -0.5,
+    
+    fill = "white", 
+    color = "#3fae5a",      
+    text.colour = "black",
+    size = 5, 
+    
+    label.size = 0.25,
+    label.padding = unit(0.15, "lines"),
+  ) +
+  
+    # Separate panel for each event
+  facet_wrap(
+  ~ Event_Phase, scales = "free", 
+  ncol = 3,
+  labeller = as_labeller(facet_labels_hr)
+) +
+
+# Labels & Theme
+labs(
+  title = "HR Agreement by Experimental Event",
+  subtitle = "† Differences are not normally distributed (Shapiro-Wilk p < .05)",
+  x = "Mean HR of Empatica and Polar (bpm)",
+  y = "Difference (Empatica - Polar) (bpm)"
+) +
+  
+  theme_minimal(base_size = 11) +
+  theme(
+    
+    plot.title = element_text(
+      face = "bold",
+      size = 15
+    ),
+    
+    strip.text = element_text(
+      face = "bold",
+      size = 13
+    ),
+    
+    axis.title = element_text(
+      face = "bold", 
+      size = 13
+    ),
+    
+    axis.text = element_text(
+      size = 13
+    )
+  )
+
+
+HR_BA_plot
+
+#Explore potential increase in underestimation with higher HR values
+ggplot(HR_BA, aes(x=mean_HR, y=diff_HR)) + geom_point() + geom_smooth(method="lm") + theme_apa()
+cor.test(HR_BA$mean_HR, HR_BA$diff_HR, method="spearman")
+
+
+```
+
+### Save Plots 
+
+```{r save-bland-altman-plots}
+
+#RMSSD
+ggsave(
+  "RMSSD_BA_plot.png",
+  RMSSD_BA_plot,
+  width = 12,
+  height = 8,
+  units = "in",
+  dpi = 600
+)
+
+#HFn
+ggsave(
+  "HFn_BA_plot.png",
+  HFn_BA_plot,
+  width = 12,
+  height = 8,
+  units = "in",
+  dpi = 600
+)
+
+#HR
+ggsave(
+  "HR_BA_plot.png",
+  HR_BA_plot,
+  width = 12,
+  height = 8,
+  units = "in",
+  dpi = 600
+)
+
+```
+
+
+## 4.4 Agreement between Sensors: ICC (A1) 
+
+### For RMSSD
+
+```{r agreemment-between-sensors-rmssd}
+
+#Compute ICC 
+icc_results_rmssd <- Cardio_Comparison %>%
+  
+  filter(
+    complete.cases(
+      lnRMSSD_Polar,
+      lnRMSSD_Empatica
+    )
+  ) %>%
+  
+  group_by(Event_Phase) %>%
+  
+  group_modify(~{
+    
+    if (nrow(.x) <= 2) {
+      return(tibble())
+    }
+    
+    icc <- ICC(
+      .x %>%
+        select(
+          lnRMSSD_Polar,
+          lnRMSSD_Empatica
+        )
+    )
+    
+    data.frame(
+      Type = rownames(icc$results),
+      icc$results,
+      row.names = NULL
+    )
+  }) %>%
+  
+  ungroup()
+
+#View Results
+icc_results_rmssd <- icc_results_rmssd %>% 
+  filter(Type == "Single_raters_absolute") %>% dplyr:: select(c(Event_Phase, Type, ICC, lower.bound, upper.bound, F,df1,df2,p, type ))
+
+
+```
+
+### For HFn
+
+```{r agreemment-between-sensors-frequency}
+
+#Compute ICC 
+icc_results_hfn <- Cardio_Comparison %>%
+  
+  filter(
+    complete.cases(
+      HRV_HFn_Polar,
+      HRV_HFn_Empatica
+    )
+  ) %>%
+  
+  group_by(Event_Phase) %>%
+  
+  group_modify(~{
+    
+    if (nrow(.x) <= 2) {
+      return(tibble())
+    }
+    
+    icc <- ICC(
+      .x %>%
+        select(
+          HRV_HFn_Polar,
+          HRV_HFn_Empatica
+        )
+    )
+    
+    data.frame(
+      Type = rownames(icc$results),
+      icc$results,
+      row.names = NULL
+    )
+  }) %>%
+  
+  ungroup()
+
+#View Results
+icc_results_hfn <- icc_results_hfn %>% 
+  filter(Type == "Single_raters_absolute") %>% dplyr:: select(c(Event_Phase, Type, ICC, lower.bound, upper.bound, F,df1,df2,p, type ))
+
+icc_results_hfn
+
+```
+
+### For HR
+
+```{r agreemment-between-sensors-hr}
+
+#Compute ICC 
+icc_results_hr <- Cardio_Comparison %>%
+  
+  filter(
+    complete.cases(
+      HR_Polar,
+      HR_Empatica
+    )
+  ) %>%
+  
+  group_by(Event_Phase) %>%
+  
+  group_modify(~{
+    
+    if (nrow(.x) <= 2) {
+      return(tibble())
+    }
+    
+    icc <- ICC(
+      .x %>%
+        select(
+          HR_Polar,
+          HR_Empatica
+        )
+    )
+    
+    data.frame(
+      Type = rownames(icc$results),
+      icc$results,
+      row.names = NULL
+    )
+  }) %>%
+  
+  ungroup()
+
+#View Results
+icc_results_hr <- icc_results_hr %>% 
+  filter(Type == "Single_raters_absolute") %>% dplyr:: select(c(Event_Phase, Type, ICC,lower.bound, upper.bound, F,df1,df2,p, type ))
+
+
+```
+
+## 4.5 Correlations between Sensors
+
+### RMSSD
+
+```{r correlations-between-sensors-rmssd}
+
+# Get event names
+events <- unique(Cardio_Comparison$Event_Phase)
+
+# Empty table for correlations
+cor_results <- data.frame()
+
+# Empty list for plots
+plot_list <- list()
+
+for(event in events) {
+
+  # Subset data
+  df_event <- subset(
+    Cardio_Comparison,
+    Event_Phase == event
+  )
+
+  # Remove missing values
+  df_event <- df_event[
+    complete.cases(
+      df_event$lnRMSSD_Polar,
+      df_event$lnRMSSD_Empatica
+    ),
+  ]
+
+  # Only continue if enough data
+  if(nrow(df_event) > 2) {
+
+    # Pearson correlation
+    r <- cor(
+      df_event$lnRMSSD_Polar,
+      df_event$lnRMSSD_Empatica,
+      method = "spearman"
+    )
+
+    # p-value
+    cor_test <- cor.test(
+      df_event$lnRMSSD_Polar,
+      df_event$lnRMSSD_Empatica,
+      method = "spearman"
+    )
+
+    # Save results
+    cor_results <- rbind(
+      cor_results,
+      data.frame(
+        Event_Grouped = event,
+        Pearson_r = r,
+        p_value = cor_test$p.value,
+        N = nrow(df_event)
+      )
+    )
+
+    # Create plot
+    p <- ggplot(
+      df_event,
+      aes(
+        x = lnRMSSD_Polar,
+        y = lnRMSSD_Empatica
+      )
+    ) +
+
+      geom_point(size = 2) +
+
+      geom_smooth(
+        method = "lm",
+        se = FALSE
+      ) +
+
+      labs(
+        title = paste0(
+          event,
+          " (r = ", round(r, 2),", p = ", round(cor_test$p.value,3),")"
+        ),
+        x = "Polar lnRMSSD",
+        y = "Empatica lnRMSSD"
+      ) +
+
+      theme_minimal()
+
+    # Store plot
+    plot_list[[event]] <- p
+  }
+}
+
+# Show correlation results
+print(cor_results)
+wrap_plots(plot_list, ncol = 4)
+
+```
+
+### HFn
+
+```{r correlations-between-sensors-hfn}
+
+# Get event names
+events <- unique(Cardio_Comparison$Event_Phase)
+
+# Empty table for correlations
+cor_results <- data.frame()
+
+# Empty list for plots
+plot_list <- list()
+
+for(event in events) {
+
+  # Subset data
+  df_event <- subset(
+    Cardio_Comparison,
+    Event_Phase == event
+  )
+
+  # Remove missing values
+  df_event <- df_event[
+    complete.cases(
+      df_event$HRV_HFn_Polar,
+      df_event$HRV_HFn_Empatica
+    ),
+  ]
+
+  # Only continue if enough data
+  if(nrow(df_event) > 2) {
+
+    # Pearson correlation
+    r <- cor(
+      df_event$HRV_HFn_Polar,
+      df_event$HRV_HFn_Empatica,
+      method = "spearman"
+    )
+
+    # p-value
+    cor_test <- cor.test(
+      df_event$HRV_HFn_Polar,
+      df_event$HRV_HFn_Empatica,
+      method = "spearman"
+    )
+
+    # Save results
+    cor_results <- rbind(
+      cor_results,
+      data.frame(
+        Event_Grouped = event,
+        Pearson_r = r,
+        p_value = cor_test$p.value,
+        N = nrow(df_event)
+      )
+    )
+
+    # Create plot
+    p <- ggplot(
+      df_event,
+      aes(
+        x = HRV_HF_Polar,
+        y = HRV_HF_Empatica
+      )
+    ) +
+
+      geom_point(size = 2) +
+
+      geom_smooth(
+        method = "lm",
+        se = FALSE
+      ) +
+
+      labs(
+        title = paste0(
+          event,
+          " (r = ", round(r, 2),", p = ", round(cor_test$p.value,3),")"
+        ),
+        x = "Polar HRV_HFn",
+        y = "Empatica HRV_HFn"
+      ) +
+
+      theme_minimal()
+
+    # Store plot
+    plot_list[[event]] <- p
+  }
+}
+
+# Show correlations
+print(cor_results)
+wrap_plots(plot_list, ncol = 4)
+
+
+```
+
+### HR
+
+```{r correlations-between-sensors-hr}
+
+# Get event names
+events <- unique(Cardio_Comparison$Event_Phase)
+
+# Empty table for correlations
+cor_results <- data.frame()
+
+# Empty list for plots
+plot_list <- list()
+
+for(event in events) {
+
+  # Subset data
+  df_event <- subset(
+    Cardio_Comparison,
+    Event_Phase  == event
+  )
+
+  # Remove missing values
+  df_event <- df_event[
+    complete.cases(
+      df_event$HR_Polar,
+      df_event$HR_Empatica
+    ),
+  ]
+
+  # Only continue if enough data
+  if(nrow(df_event) > 2) {
+
+    # Pearson correlation
+    r <- cor(
+      df_event$HR_Polar,
+      df_event$HR_Empatica,
+      method = "spearman"
+    )
+
+    # p-value
+    cor_test <- cor.test(
+      df_event$HR_Polar,
+      df_event$HR_Empatica,
+      method = "spearman"
+    )
+
+    # Save results
+    cor_results <- rbind(
+      cor_results,
+      data.frame(
+        Event_Grouped = event,
+        Pearson_r = r,
+        p_value = cor_test$p.value,
+        N = nrow(df_event)
+      )
+    )
+
+    # Create plot
+    p <- ggplot(
+      df_event,
+      aes(
+        x = HR_Polar,
+        y = HR_Empatica
+      )
+    ) +
+
+      geom_point(size = 2) +
+
+      geom_smooth(
+        method = "lm",
+        se = FALSE
+      ) +
+
+      labs(
+        title = paste0(
+          event,
+        " (r = ", round(r, 2),", p = ", round(cor_test$p.value,3),")"
+        ),
+        x = "Polar HR",
+        y = "Empatica HR"
+      ) +
+
+      theme_minimal()
+
+    # Store plot
+    plot_list[[event]] <- p
+  }
+}
+
+# Show correlation table
+print(cor_results)
+wrap_plots(plot_list, ncol = 4)
+
+```
+
+
+# 5. Event Level Analysis
+
+## 5.1 Prepare: Long dataset 
+
+```{r prep-long-dataset}
+
+#Create Long Dataset
+Cardio_Comparison_long <- Cardio_Comparison %>%
+  pivot_longer(
+    cols = matches("_(Empatica|Polar)$"),
+    names_to = c(".value", "Device"),
+    names_pattern = "(.*)_(Empatica|Polar)$"
+  ) 
+
+#Only look at Baseline & Fatigue Induction (AF & PF)
+Cardio_Comparison_long_F <- Cardio_Comparison_long %>% 
+  filter (!Event_Phase %in% c("Drone")) %>% 
+  filter(Group != "Control")
+
+
+#Z-Score
+Cardio_Comparison_long_F <- Cardio_Comparison_long_F %>%
+  group_by(Device) %>%
+  mutate(lnRMSSD_z = as.numeric(scale(lnRMSSD)), 
+         HFn_z = as.numeric(scale(HRV_HFn)), 
+         HR_z = as.numeric(scale(HR))) %>%
+  ungroup()
+
+```
+
+## 5.2 Visual Inspection: Fatigue Type 
+
+```{r difference-fatigue}
+
+#lnRMSSD
+Cardio_Comparison_long_F %>%
+ggplot(aes(x=Event_Phase, y=lnRMSSD, fill=Group)) + geom_boxplot() + facet_grid(~Device) +theme_minimal()
+
+
+#HRV HF
+Cardio_Comparison_long_F %>%
+ggplot(aes(x=Event_Phase, y=HRV_HF, fill=Group)) + geom_boxplot() + facet_grid(~Device) +theme_minimal()
+  
+
+#HR Quo
+Cardio_Comparison_long_F %>% 
+ggplot(aes(x=Event_Phase, y=HR, fill=Group)) + geom_boxplot() + facet_grid(~Device) +theme_minimal()
+
+```
+
+## 5.3 Linear Mixed-Model
+
+To test, if both devices (Polar and Empatica) lead to the same  conclusions about the experimental manipulation, we will utilize a linear mixed model. 
+We will only be looking at the potential change from baseline to fatigue condition (introduced by the fatigue manipulation). 
+
+For each CVA metric, we will specify the following formula: 
+
+-> CVA_Outcome ~ Group * Event_Phase * Device + Random_Intercept
+
+#### LnRMSSD Model 
+
+```{r mixed-model-rmssd}
+
+#Build Model 
+mod_rmssd <- lmer(lnRMSSD_z ~ Group * Event_Phase * Device +    (1 | ID), data= Cardio_Comparison_long_F)
+summary(mod_rmssd)
+anova(mod_rmssd)
+
+#Visualize the EMM (separated by Group)
+plot_emm_rmssd <- emmip(
+  mod_rmssd,
+  Device ~ Event_Phase | Group,
+  CIs = TRUE) + theme_minimal() + 
+  labs(
+    title = paste("Estimated Marginal Means"),
+    subtitle = paste("lnRMSSD (z-scored)"),
+    x = "Event",
+    y = "lnRMSSD"
+  )  + theme_apa() +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 14
+    ),
+     strip.text = element_text(
+      face = "bold",
+      size = 14
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 14
+  ), 
+    
+    axis.text = element_text(
+      size = 14), 
+    legend.text = element_text(size = 12),
+  legend.title = element_text(size = 12))
+
+
+# Estimated marginal means of Phase
+# separately for each Device × Group combination
+emm_rmssd <- emmeans(
+  mod_rmssd,
+  ~ Event_Phase | Device * Group)
+pairs(
+  emm_rmssd,
+    reverse = TRUE,
+  adjust = "BH")
+```
+
+
+#### HFn Model 
+
+```{r mixed-model-rmssd}
+
+#Build Model 
+mod_hfn <- lmer(HFn_z ~ Group * Event_Phase * Device +    (1 | ID), data= Cardio_Comparison_long_F)
+summary(mod_hfn)
+anova(mod_hfn)
+
+
+#Visualize the EMM (separated by Group)
+plot_emm_hfn <- emmip(
+  mod_hfn,
+  Device ~ Event_Phase | Group,
+  CIs = TRUE) + theme_minimal() +
+  labs(
+    title = paste("Estimated Marginal Means"),
+    subtitle = paste("Normalized High Frequency (z-scored)"),
+    x = "Event",
+    y = "HFn"
+  ) + theme_apa() +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 14
+    ),
+     strip.text = element_text(
+      face = "bold",
+      size = 14
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 14
+  ), 
+    
+    axis.text = element_text(
+      size = 14), 
+    legend.text = element_text(size = 12),
+  legend.title = element_text(size = 12))
+
+# Estimated marginal means of Phase
+emm_hfn <- emmeans(
+  mod_hfn,
+  ~ Event_Phase | Device * Group)
+pairs(
+  emm_hfn,
+   reverse = TRUE,
+  adjust = "BH")
+```
+
+#### HR 
+
+```{r mixed-model-hr}
+
+#Build Model 
+mod_hr <- lmer(HR_z ~ Group * Event_Phase * Device +    (1 | ID), data= Cardio_Comparison_long_F)
+summary(mod_hr)
+anova(mod_hr)
+
+
+#Visualize the EMM (separated by Group)
+plot_emm_hr <- emmip(
+  mod_hr,
+  Device ~ Event_Phase | Group,
+  CIs = TRUE) + theme_minimal() +
+  labs(
+    title = paste("Estimated Marginal Means"),
+    subtitle = paste("Heart Rate (z-scored)"),
+    x = "Event",
+    y = "HR"
+  ) + theme_apa() +
+    theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 14
+    ),
+     strip.text = element_text(
+      face = "bold",
+      size = 14
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 14
+  ), 
+    
+    axis.text = element_text(
+      size = 14), 
+    legend.text = element_text(size = 12),
+  legend.title = element_text(size = 12))
+
+# Estimated marginal means of Phase
+emm_hr <- emmeans(
+  mod_hr,
+  ~ Event_Phase | Device * Group)
+pairs(
+  emm_hr,
+    reverse = TRUE,
+  adjust = "BH")
+```
+
+### Combined plot 
+
+```{r put-emm-plots-in-one}
+
+#Remove individual x-axis titles
+plot_emm_rmssd <- plot_emm_rmssd + labs(x = NULL)
+plot_emm_hfn   <- plot_emm_hfn   + labs(x = NULL)
+
+#Combine
+combined_plot <- (
+  plot_emm_rmssd /
+  plot_emm_hfn /
+  plot_emm_hr
+) +
+  plot_layout(
+    guides = "collect",
+    heights = c(1, 1, 1)
+  ) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(
+      plot.tag = element_text(face = "bold", size = 12)
+    )
+  )+ coord_cartesian(ylim = c(-2, 2))
+
+combined_plot
+
+# Save larger
+ggsave(
+  "Combined_EMM_plot.png",
+  combined_plot,
+  width = 12,
+  height = 8,
+  units = "in",
+  dpi = 600
+)
+
+```
+
+
+## 5.4 Check Assumptions of Models
+
+### For lnRMSSD
+
+```{r assumptions-lnrmssd-model}
+
+#Check Assumptions 
+
+## Plots
+check_rmssd <- check_model(mod_rmssd)
+windows()
+plot(check_rmssd)
+
+
+## Functions
+performance::check_normality(mod_rmssd)
+performance::check_heteroscedasticity(mod_rmssd)
+performance::check_singularity(mod_rmssd)
+r2(mod_rmssd)
+
+## Normality of Random Intercept
+ri_rmssd <- ranef(mod_rmssd)$ID
+qqnorm(ri_rmssd[, "(Intercept)"])
+qqline(ri_rmssd[, "(Intercept)"], col = "red")
+shapiro.test(ri_rmssd[, "(Intercept)"])
+
+icc(mod_rmssd)
+
+
+```
+
+### For HFn 
+
+```{r assumptions-hfn-model}
+
+#Check Assumptions 
+
+## Plots
+check_hfn <- check_model(mod_hfn)
+windows()
+plot(check_hfn)
+dev.off()
+
+
+## Functions
+performance::check_normality(mod_hfn)
+performance::check_heteroscedasticity(mod_hfn)
+performance::check_singularity(mod_hfn)
+r2(mod_hfn)
+
+
+## Normality of Random Intercept
+ri_hfn <- ranef(mod_hfn)$ID
+qqnorm(ri_hfn[, "(Intercept)"])
+qqline(ri_hfn[, "(Intercept)"], col = "red")
+shapiro.test(ri_hfn[, "(Intercept)"])
+
+
+icc(mod_hfn)
+
+```
+
+### For HR 
+
+```{r assumptions-hr-model}
+
+#Check Assumptions 
+
+## Plots
+check_hr <- check_model(mod_hr)
+windows()
+plot(check_hr)
+dev.off()
+
+## Functions
+performance::check_normality(mod_hr)
+performance::check_heteroscedasticity(mod_hr)
+performance::check_singularity(mod_hr)
+r2(mod_hr)
+
+
+## Normality of Random Intercept
+ri_hr <- ranef(mod_hr)$ID
+qqnorm(ri_hr[, "(Intercept)"])
+qqline(ri_hr[, "(Intercept)"], col = "red")
+shapiro.test(ri_hr[, "(Intercept)"])
+
+
+plot(fitted(mod_hr), resid(mod_hr))
+abline(h = 0, col = "red")
+
+icc(mod_hr) 
+
+```
+

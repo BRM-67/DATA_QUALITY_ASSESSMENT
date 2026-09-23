@@ -1,0 +1,1301 @@
+---
+title: "Fatigue Physio Preprocessing"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This is the preprocessing of cardiovascular activity data of the study \_\_\_\_\_\_\_. For further information on the study, please refer to the corresponding paper.
+
+---
+
+# 0. Packages
+
+a)  Download Data Wrangling Packages
+
+```{r data-wrangling-packages,include=FALSE	}
+
+library(readxl) #To import the data
+library(tidyverse) #To prepare the data adequately
+library(magrittr) #To ensure seamless workflow
+library(writexl) #To export data
+library(purrr) #programming tools 
+library(stringr) #wrappers
+```
+
+b)  Download Statistics & Analysis Packages
+
+```{r statistics-packages, include=FALSE	}
+
+library (Hmisc) #Harrell Miscellaneous
+library(jtools) #analysis and presentation of data
+library(knitr) #reporting 
+```
+
+c)  Download TimeSeries-Related Packages
+
+```{r timeseries-packages, include=FALSE	}
+
+library(imputeTS) #timeseries imputation
+library(slider) #sliding window function
+library(pracma) #for imputations (math function package)
+library(hms) #for pretty time of day
+library(lubridate) #parse & manipulate dates 
+```
+
+# 1. Import Data
+
+## 1.1 Import TimeStamps & Performance
+
+```{r import-timestamps}
+
+#Import Data 
+Timestamps <- read_excel("../Supplementary_Inputs/Timestamps_Final.xlsx", 
+    col_types = c("text", "text", "numeric", 
+        "text", "date", "date", "date", "date", 
+        "date", "date", "date", "numeric", 
+        "text", "text", "text", "text", "text", 
+        "text", "text"))
+
+
+#Quick-Timestamp Preprocess: 
+time_cols <- c(
+  "Start_Baseline", "End_Baseline",
+  "End_Trail1", "End_Trail2", "End_Trail3",
+  "Start_Drone", "End_Drone"
+)
+
+Timestamps <- Timestamps %>%
+  mutate(across(all_of(time_cols),
+                ~ format(.x, "%H:%M:%S")))
+
+```
+
+## 1.2. Import Survey Data
+
+```{r import-self-reports}
+
+#Data from after Task
+Fatigue_Task <- read_excel("../Supplementary_Inputs/Fatigue_1.xlsx", 
+    col_types = c("text", "text", "text", 
+        "text", "text", "date", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text", "text", 
+        "text", "text", "text", "text"))
+Fatigue_Task <- Fatigue_Task[-1, ]
+
+```
+
+## 1.3 Import Empatica Data
+
+```{r import-empatica-data}
+
+#RR-Intervall Data 
+Empatica_RR <- read_csv("CVA_Empatica/systolic_peaks_all_participants.csv")
+Empatica_RR <- Empatica_RR %>% rename(ID = participant_id, Local_Time = local_time_sec)
+Empatica_RR %>% distinct(ID) %>% print(n=50)
+
+#Delete Empatica HR Data w/o Self-Report (No Participation in Full Study)
+Empatica_RR <- Empatica_RR %>% 
+  filter(!ID %in% c("OITC40", "OITC45", "OITC46")) #Ages: 24,26,30, Gender: F,M,M
+
+#Delete Participant, which disregarded Instruction for n-Back Task
+Empatica_RR <- Empatica_RR %>% 
+  filter(!ID %in% c("OITC04"))
+
+```
+
+## 1.4 Import Polar Data: RR
+
+```{r import-polar-data-rr}
+
+#Set Working Directory
+setwd("./CVA_Reference")
+
+# List RR files that start with "ID" followed by digits
+rrfiles <- list.files(pattern = "_RR", full.names = TRUE)
+
+#Load all files into a list
+rr_list <- lapply(rrfiles, read.csv)
+names(rr_list) <- tools::file_path_sans_ext(basename(rrfiles)) #adopt names
+
+```
+
+## 1.5 Import Polar Data: HR
+Needed for Meta-Data of the Polar recording.  
+
+```{r import-polar-data-hr}
+
+setwd("./CVA_Reference")
+#List all HR-Files 
+hrfiles <- list.files( pattern="_HR",full.names=TRUE)
+
+
+#Load all files into a list
+hr_list <- lapply(hrfiles, read.csv)
+names(hr_list) <- tools::file_path_sans_ext(basename(hrfiles)) #adopt name
+
+```
+
+# 2. Preprocess: Clean Self-Report Data 
+
+```{r clean-selfreport-data}
+
+#Rename Columns
+Fatigue_Task <- Fatigue_Task %>% rename(Session = IN06_04, Color = IN06_02, ID = IN06_01, Station = IN06_03, Start_Q1 = STARTED)
+Fatigue_Task$ID[Fatigue_Task$ID == "01TC3"] <- "OITC03"
+
+#Clean Identifier 
+
+## Build Function
+fix_id <- function(x) {
+  # Extract numbers from ID
+  nums <- gsub("\\D", "", x)
+  
+  # Rebuild as OITCXX
+  paste0("OITC", sprintf("%02d", as.numeric(nums)))
+}
+
+## Apply
+Fatigue_Task$ID <- fix_id(Fatigue_Task$ID)
+
+```
+
+# 3. Preprocess: Get Polar Data in the right Format
+
+## 3.1 Participant Information  
+Save Meta Data (Start-Time of recording) for each ID into a dataframe called "Participant_Info". 
+
+```{r}
+
+#1) Create Empty List
+participant_info_list <- list()  # For metadata
+cleaned_data_list <- list()      # For cleaned HR data
+
+#2) Loop through each dataframe in the list
+for (i in seq_along(hr_list)) {
+  
+  df <- hr_list[[i]]
+  df_name <- names(hr_list)[i]
+  
+  ## a) Extract participant info from first row
+  info <- data.frame(
+    Date = df[1, 3],
+    StartTime = df[1, 4],
+    Duration = df[1, 5],
+    Avg_HR = df[1, 7],
+    File = df_name,
+    stringsAsFactors = FALSE
+  )
+  
+  participant_info_list[[i]] <- info
+  
+  ## b) Clean the rest of the data
+  cleaned <- df[-(1:2), ]  # Remove first 2 rows
+  cleaned <- cleaned %>%
+    rename(Time = Sport, HR = Date) %>%
+    select(Time, HR) #rename & select 
+  cleaned$HR <- as.numeric(cleaned$HR)
+  cleaned$File <- df_name  # Add file name to each row for ID
+  
+  cleaned_data_list[[df_name]] <- cleaned
+}
+
+#3) Combine all participant metadata into one dataframe
+Participant_Info<- bind_rows(participant_info_list)
+Polar_HR <- bind_rows(cleaned_data_list)
+
+
+#4) Change File Name to ID 
+
+## Extract ID from file name (e.g., "ID23_Whatever.csv" → "ID23")
+extract_id <- function(filename) {
+  sub("^((OITC[0-9]+)).*", "\\1", filename)
+}
+
+## Create ID
+Participant_Info$ID <- extract_id(Participant_Info$File)
+Participant_Info <- Participant_Info %>%
+  select(ID, everything(), -c(File))
+
+```
+
+## 3.2 RR-Data 
+Add a TimeStamp to the RR-Data from Polar. 
+Add the ID (from the name of the dataframes), the real TimeStamp (from Start Time of Measurement) and a Seconds Counter to the RR-Intervals. 
+Meta-Data is provided from "Participant_Info". 
+
+```{r preproccess-RR-data}
+
+#1) Add ID
+updated_rr <- list() #create empty list document
+
+## Loop through each dataframe in the list
+for (df_name in names(rr_list)) {
+  
+  # Extract ID (e.g., "ID01") from the dataframe name
+  id_match <- regmatches(df_name, regexec("^(OITC\\d+)_", df_name))[[1]]
+  
+  # If no ID found, skip
+  if (length(id_match) < 2) {
+    warning(paste("ID not found in:", df_name))
+    next
+  }
+  
+  id <- id_match[2]
+  
+  # Get the dataframe and add the ID column
+  df <- rr_list[[df_name]] %>%
+    mutate(ID = id) %>% select(c("ID", "offline", "duration")) %>% rename(RR = duration)
+  
+  # Store in updated list
+  updated_rr[[df_name]] <- df
+}
+
+## Combine into one dataframe
+Polar_RR <- bind_rows(updated_rr)
+
+#2) Add TimeStamp
+
+## Add StartTime to RR Data 
+Polar_RR <-
+  Polar_RR %>%
+  left_join(Participant_Info %>% select(ID, StartTime), by = "ID")
+
+##Start TimeStamp after first RR Intervall
+Polar_RR <- Polar_RR %>%
+  group_by(ID) %>%
+  mutate(
+    cum_duration_ms = cumsum(RR),
+    
+    Seconds = cum_duration_ms / 1000,
+    
+    Timestamp = hms::as_hms(
+      as.numeric(lubridate::hms(StartTime)) + Seconds
+    )
+  ) %>% 
+  ungroup()
+
+##Adjust to start at 0.00?
+RR_0 <- Polar_RR  %>%
+  group_by(ID) %>%
+  mutate(
+    cum_duration_ms = cumsum(RR) - first(RR), # adjust to start at 0.00
+    Seconds = cum_duration_ms / 1000,
+  ) %>%
+  ungroup()
+
+```
+
+# 4. Preprocess: Flagging & Filtering Data
+
+Okay, so the following events need to be flagged in the RR-Data. This is the time-phases we want to keep & analyze. 
+
+- Baseline Measurement (as Baseline): from Start_Baseline to End_Baseline
+
+- Trial (n-Back & Video) Measurement:
+
+  - in 1-Back & Dual-2-Back (as TrialX) End_Trial1 - 300, End_Trial2 - 300, End_Trial3 - 300
+
+  - in Control (as Video) = Start_Q1 - 900
+
+- Drone Measurement (as Drone): from Start_Drone to End_Drone
+
+## 4.1 For Empatica Data
+
+### 4.1.1 Event Flagging in Empatica Data
+
+```{r event-flagging-in-empatica-data}
+
+#Unify Data from Started Fatigue_Task to Timestamp 
+Timestamps <- Timestamps %>%
+  left_join(Fatigue_Task %>% dplyr::select(ID,Start_Q1), by = "ID")
+
+Timestamps <- Timestamps %>% 
+  mutate (Start_Q1 = format(Start_Q1, "%H:%M:%S")) 
+
+#Event Flagging 
+
+## Convert all timestamp columns to hms 
+time_cols <- c( "Start_Baseline", "End_Baseline", "End_Trail1", "End_Trail2", "End_Trail3", "Start_Drone", "End_Drone", "Start_Q1" ) 
+Timestamps <- Timestamps %>% mutate(across(all_of(time_cols), as_hms)) 
+
+## Join + create flags
+Empatica_RR <- Empatica_RR %>% 
+  left_join(Timestamps, by = "ID") %>% 
+  
+  #Baseline 
+  mutate( Event = case_when( 
+    Local_Time >= Start_Baseline & 
+    Local_Time <= End_Baseline ~ "Baseline", 
+    
+    #Trial 1 
+    Group %in% c("1-Back", "Dual-2-Back") & !is.na(End_Trail1) &
+      Local_Time >= (End_Trail1 - 300) & #
+      Local_Time <= End_Trail1 ~ "Trial1", 
+    
+    # Trial 2 
+    Group %in% c("1-Back", "Dual-2-Back") & !is.na(End_Trail2) & 
+      Local_Time >= (End_Trail2 - 300) & Local_Time <= End_Trail2 ~ "Trial2",
+    
+    # Trial 3 
+    Group %in% c("1-Back", "Dual-2-Back") & !is.na(End_Trail3) &
+      Local_Time >= (End_Trail3 - 300) & Local_Time <= End_Trail3 ~ "Trial3", 
+    
+    # Control video condition 
+    Group == "Control" & !is.na(Start_Q1) & Local_Time >= (Start_Q1 - 900) & Local_Time <= Start_Q1 ~ "Video", 
+    
+    # Drone 
+    Local_Time >= Start_Drone & Local_Time <= End_Drone ~ "Drone", 
+   
+     # Everything else
+    TRUE ~ "Irrelevant" ) )
+
+```
+
+### 4.1.2 Filtering
+
+```{r filtering-in-empatica-data}
+
+Empatica_RR_Relevant <- Empatica_RR %>%
+  filter(Event != "Irrelevant") %>% dplyr::select(c(ID, Session, Color, Station, timestamp, Local_Time, rr_interval_ms, Event, Group, Type)) %>% rename (RR_Raw = rr_interval_ms)
+Empatica_RR_Relevant %>% distinct(ID) %>% print(n=50)
+
+```
+
+## 4.2 For Polar Data 
+
+### 4.2.1 Event Flagging in Polar Data: RR
+
+```{r event-flagging-in-empatica-data}
+
+#Event Flagging
+
+## Join Timestamps + create flags
+Polar_RR <- Polar_RR %>%
+  left_join(Timestamps, by = "ID")
+
+Polar_RR <- Polar_RR %>%
+  
+  mutate(
+    
+    ts  = as.numeric(Timestamp),
+    
+    sb  = as.numeric(Start_Baseline),
+    eb  = as.numeric(End_Baseline),
+    
+    et1 = as.numeric(End_Trail1),
+    et2 = as.numeric(End_Trail2),
+    et3 = as.numeric(End_Trail3),
+    
+    sd  = as.numeric(Start_Drone),
+    ed  = as.numeric(End_Drone),
+    
+    sq1 = as.numeric(Start_Q1),
+    
+    Event = case_when(
+      
+      # Baseline
+      ts >= sb &
+      ts <= eb ~ "Baseline",
+      
+      # Trial 1
+      Group %in% c("1-Back", "Dual-2-Back") &
+      ts >= (et1 - 300) &
+      ts <= et1 ~ "Trial1",
+      
+      # Trial 2
+      Group %in% c("1-Back", "Dual-2-Back") &
+      ts >= (et2 - 300) &
+      ts <= et2 ~ "Trial2",
+      
+      # Trial 3
+      Group %in% c("1-Back", "Dual-2-Back") &
+      ts >= (et3 - 300) &
+      ts <= et3 ~ "Trial3",
+      
+      # Video
+      Group == "Control" &
+      ts >= (sq1 - 900) &
+      ts <= sq1 ~ "Video",
+      
+      # Drone
+      ts >= sd &
+      ts <= ed ~ "Drone",
+      
+      TRUE ~ "Irrelevant"
+    )
+    
+  ) %>%
+  
+  select(-ts, -sb, -eb, -et1, -et2, -et3, -sd, -ed, -sq1)
+```
+
+### 4.2.2 Filtering: RR
+
+```{r filtering-in-empatica-data}
+
+Polar_RR_Relevant <- Polar_RR %>%
+  filter(Event != "Irrelevant") %>% dplyr::select(c(ID, Session, Color, Station, Timestamp, RR, Event, Group, Type, offline)) %>% rename (RR_Raw = RR)
+Polar_RR_Relevant %>% distinct(ID) %>% print(n=50)
+
+```
+
+# 5. Artefact Detection & Imputation
+
+Utilizing a two step-approach for detecting artefacts: 
+1) Only keep absolute plausible values (Jafaar & Chung Xian, 2021)
+2) Only keep plausible jumps (= moving local median) (Alcantara et al., 2020)
+
+## 5.1 For Empatica Data 
+
+### 5.1.1 Artifact Detection 
+
+```{r artefact-detection-for-empatica-data}
+
+#Artefact Detection 
+Empatica_RR_Raw <- Empatica_RR_Relevant %>%  
+  group_by(ID) %>%
+  
+  #Absolute Threshold
+  mutate(
+    Artifact_Flag = case_when(
+      RR_Raw < 375 ~ "Artifact",
+      RR_Raw > 1200 ~ "Artifact", 
+      TRUE ~ "OK" )) %>% 
+  
+ #Relative Threshold
+  mutate(
+    Local_Median = slide_dbl(
+      .x = RR_Raw,
+      .before = 5,  
+      .after = 5,   
+      .f = ~ median(.x, na.rm = TRUE)),
+    RR_Deviation = abs(RR_Raw - Local_Median),
+    Artifact_Flag = case_when(
+    Artifact_Flag == "Artifact" ~ "Artifact", 
+    RR_Deviation > 250 ~ "Artifact", 
+    TRUE ~ "OK")) %>%
+  
+  ungroup()
+
+```
+
+### 5.1.2 Artifact Imputation 
+
+```{r artifcat-imputation-empatica}
+
+#Change Flagged Artifacts into NAs
+Empatica_RR_Flagged <- Empatica_RR_Raw %>% 
+  mutate(RR_clean = if_else(Artifact_Flag == "Artifact", NA_real_, RR_Raw))
+
+
+#Impute TS Function: NA_MA replaces NAs w/ moving average
+Empatica_RR_Imputed <- Empatica_RR_Flagged %>%
+  group_by(ID) %>%
+  arrange(Local_Time) %>%
+  group_modify(~ {
+    .x$EWMA_RR <- na_ma(.x$RR_clean, k = 32, weighting = "exponential")
+    .x
+  }) %>%
+  ungroup()
+
+```
+
+### 5.1.3 Imputation Visualization
+
+```{r ewma-visualization-empatica}
+
+# Select participant
+selected_id <- "OITC28"
+
+# Prepare plotting data
+plot_data <- Empatica_RR_Imputed %>%
+  
+  filter(ID == selected_id) %>%
+  filter (Event %in% c("Trial1", "Drone")) %>% 
+  
+  #group_by(Event) %>%
+  
+  arrange(Local_Time) %>%
+  
+  mutate(
+    Seconds = row_number(),
+    Imputed = is.na(RR_clean)
+  ) %>%
+  
+  ungroup()
+
+# Plot
+ggplot(plot_data,
+       aes(x = Seconds,
+           y = EWMA_RR)) +
+  
+  # Main RR signal
+  geom_line(color = "blue",
+            linewidth = 0.4) +
+  
+  # Original artifacts
+  geom_point(
+    data = subset(plot_data, Imputed),
+    aes(y = RR_Raw),
+    color = "red",
+    shape = 4,
+    size = 2
+  ) +
+  
+  # EWMA imputed values
+  geom_point(
+    data = subset(plot_data, Imputed),
+    aes(y = EWMA_RR),
+    color = "black",
+    shape = 17,
+    size = 2
+  ) +
+  
+  # Connect raw artifact to imputed value
+  geom_segment(
+    data = subset(plot_data, Imputed),
+    aes(
+      xend = Seconds,
+      y = RR_Raw,
+      yend = EWMA_RR
+    ),
+    color = "grey",
+    linewidth = 0.4
+  ) +
+  
+  facet_wrap(~ Event,
+             scales = "free_x",
+             ncol = 1) +
+  
+  labs(
+    title = paste("Visualization: EWMA (Empatica)"),
+    subtitle = paste("IBI Time Series:", selected_id),
+    x = "Seconds",
+    y = "IBI interval (ms)"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  
+  theme(
+    plot.title = element_text(
+      size = 15
+    ),
+    plot.subtitle = element_text(size=8),
+    
+    strip.text = element_text(
+      size = 10
+    ),
+    
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+## 5.2 For Polar
+
+### 5.2.1 Artifact Detection: RR Data 
+
+```{r artefact-detection-for-polar-rr-data}
+
+#Artefact Detection 
+Polar_RR_Raw <- Polar_RR_Relevant %>%  
+  group_by(ID) %>%
+  
+  #Absolute Threshold
+  mutate(
+    Artifact_Flag = case_when(
+      RR_Raw < 375 ~ "Artifact",
+      RR_Raw > 1200 ~ "Artifact", 
+      TRUE ~ "OK" )) %>% 
+  
+ #Relative Threshold
+  mutate(
+    Local_Median = slide_dbl(
+      .x = RR_Raw,
+      .before = 5,  
+      .after = 5,   
+      .f = ~ median(.x, na.rm = TRUE)),
+    RR_Deviation = abs(RR_Raw - Local_Median),
+    Artifact_Flag = case_when(
+    Artifact_Flag == "Artifact" ~ "Artifact", 
+    RR_Deviation > 250 ~ "Artifact", 
+    TRUE ~ "OK")) %>%
+  
+  ungroup()
+
+
+```
+
+### 5.2.2 Artifact Imputation 
+
+```{r artifcat-imputation-polar-rr}
+
+#Change Flagged Artifacts into NAs
+Polar_RR_Flagged <- Polar_RR_Raw %>% 
+  mutate(RR_clean = if_else(Artifact_Flag == "Artifact", NA_real_, RR_Raw))
+
+
+#Impute TS Function: NA_MA replaces NAs w/ moving average
+Polar_RR_Imputed <- Polar_RR_Flagged %>%
+  group_by(ID) %>%
+  arrange(Timestamp) %>%
+  group_modify(~ {
+    .x$EWMA_RR <- na_ma(.x$RR_clean, k = 32, weighting = "exponential")
+    .x
+  }) %>%
+  ungroup()
+
+```
+
+### 5.2.3 Imputation Visualization
+
+```{r ewma-visualization-polar-rr}
+
+# Select participant
+selected_id <- "OITC28"
+
+# Prepare plotting data
+plot_data <- Polar_RR_Imputed %>%
+  
+  filter(ID == selected_id) %>%
+  filter (Event %in% c("Trial1", "Drone")) %>% 
+  
+  #group_by(Event) %>%
+  
+  arrange(Timestamp) %>%
+  
+  mutate(
+    Seconds = row_number(),
+    Imputed = is.na(RR_clean)
+  ) %>%
+  
+  ungroup()
+
+# Plot
+ggplot(plot_data,
+       aes(x = Seconds,
+           y = EWMA_RR)) +
+  
+  # Main RR signal
+  geom_line(color = "blue",
+            linewidth = 0.4) +
+  
+  # Original artifacts
+  geom_point(
+    data = subset(plot_data, Imputed),
+    aes(y = RR_Raw),
+    color = "red",
+    shape = 4,
+    size = 2
+  ) +
+  
+  # EWMA imputed values
+  geom_point(
+    data = subset(plot_data, Imputed),
+    aes(y = EWMA_RR),
+    color = "black",
+    shape = 17,
+    size = 2
+  ) +
+  
+  # Connect raw artifact to imputed value
+  geom_segment(
+    data = subset(plot_data, Imputed),
+    aes(
+      xend = Seconds,
+      y = RR_Raw,
+      yend = EWMA_RR
+    ),
+    color = "grey",
+    linewidth = 0.4
+  ) +
+  
+  facet_wrap(~ Event,
+             scales = "free_x",
+             ncol = 1) +
+  
+  labs(
+    title = paste("Visualization: EWMA (Polar)"),
+    subtitle = paste("RR Time Series:", selected_id),
+    x = "Seconds",
+    y = "RR interval (ms)"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  
+  theme(
+    plot.title = element_text(
+      size = 15
+    ),
+    
+    plot.subtitle = element_text(size=8),
+    
+    strip.text = element_text(
+      size = 10
+    ),
+    
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+# 6. Compute HR
+
+## For Empatica
+
+```{r compute-hr-empatica}
+
+#Compute beat-to-beat HR
+Empatica_HR <- Empatica_RR_Imputed %>%
+  mutate(
+    # Heart Rate from imputed RR
+    HR = round(60000 / EWMA_RR)) %>% 
+  dplyr:: select(-c(RR_Raw, Artifact_Flag, Local_Median, RR_Deviation, RR_clean, EWMA_RR ))
+
+#Compute to 1-second HR
+Empatica_HR <- Empatica_HR %>%
+  group_by(ID, Event, timestamp) %>%
+  mutate(
+    HR = mean(HR, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+
+```
+
+## For Polar
+
+```{r compute-hr-polar}
+
+#Compute beat-to-beat HR
+Polar_HR <- Polar_RR_Imputed %>%
+  mutate(
+    # Beat-to-beat HR
+    HR = 60000 / EWMA_RR,
+
+    # Timestamp with Nanoseconds, convert to Timestamp with Millisecond
+    
+    ## Convert timestamp to numeric seconds
+    Time_numeric = as.numeric(Timestamp),
+
+    ## Millisecond precision
+    Time_ms = floor(Time_numeric * 1000) / 1000,
+
+    ## Second bin
+    Time_sec = floor(Time_ms)
+  )
+
+#Compute to 1-second HR
+Polar_HR <- Polar_HR %>%
+ group_by(
+    ID,
+    Session,
+    Color,
+    Station,
+    Event,
+    Group,
+    Type,
+    Time_sec
+  ) %>%
+
+  summarise(
+    HR = round(mean(HR, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+
+  mutate(
+    Timestamp = hms::as_hms(Time_sec)
+  ) %>%
+
+  select(
+    ID, Session, Color, Station,
+    Timestamp, HR, Event, Group, Type
+  )
+
+```
+
+# 7. Normalize HR 
+
+## 7.1 For Empatica 
+
+```{r create-HR-quotient-empatica}
+
+#Create Mean Baseline
+Empatica_Base_HR <- Empatica_HR %>%
+  filter(Event == "Baseline") %>%
+  group_by(ID) %>%
+  summarise(Base_HR = round(mean(HR, na.rm = TRUE)), .groups = "drop")
+
+# 2. Join baseline HR to full HR data
+Empatica_HR <- Empatica_HR %>% 
+  left_join(Empatica_Base_HR, by = "ID")
+
+# 3. Compute Quotient and Difference per row
+Empatica_HR <- Empatica_HR %>%
+  group_by(ID) %>%  
+  mutate(
+    HR_Quo = (HR - Base_HR) / Base_HR  ) %>%
+  ungroup()
+
+
+# 4. Create 5-Min Epochs per Event
+Empatica_HR_Epochs <- Empatica_HR %>%
+  group_by(ID, Session, Event) %>% 
+  arrange(timestamp, .by_group = TRUE) %>%
+ mutate(
+    event_start = min(timestamp),
+    elapsed_sec = as.numeric(timestamp - event_start),
+    epoch_5min = floor(elapsed_sec / 300) + 1,
+    Elapsed_second_epoch = elapsed_sec %% 300,
+    Event_Epoch = paste0(Event, "_", epoch_5min)
+  ) %>%
+  group_by(ID, Event_Epoch) %>%
+  filter(
+    max(Elapsed_second_epoch) >= 214) %>%
+  ungroup()
+
+#5. Compute Mean per Epoch 
+Empatica_HR_Epochs <- Empatica_HR_Epochs %>% 
+   group_by(ID, Event_Epoch) %>% 
+  summarise(
+   
+     # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    Event = first(Event),
+   
+    # Number of observations
+    N_HR = n(),
+    
+     # Quotient
+    HR_Quo = round(mean(HR_Quo, na.rm = TRUE), 2),
+    
+    # HR
+    HR = round(mean(HR, na.rm = TRUE)),
+
+    
+    .groups = "drop")
+  
+
+```
+
+## 7.2 For Polar 
+
+```{r create-HR-quotient-polar}
+
+# 1. Create Mean Baseline
+Polar_Base_HR <- Polar_HR %>%
+  filter(Event == "Baseline") %>%
+  group_by(ID) %>%
+  summarise(Base_HR = round(mean(HR, na.rm = TRUE)), .groups = "drop")
+
+# 2. Join baseline HR to full HR data
+Polar_HR <- Polar_HR %>% 
+  left_join(Polar_Base_HR, by = "ID")
+
+# 3. Compute Quotient and Difference per row
+Polar_HR <- Polar_HR %>%
+  group_by(ID) %>%  
+  mutate(
+    HR_Quo = (HR - Base_HR) / Base_HR  ) %>%
+  ungroup()
+
+
+# 4. Create 5-Min Epochs per Event
+Polar_HR_Epochs <- Polar_HR %>%
+  group_by(ID, Session, Event) %>%
+  arrange(Timestamp, .by_group = TRUE) %>%
+  mutate(
+    event_start = min(Timestamp),
+    elapsed_sec = as.numeric(Timestamp - event_start),
+    epoch_5min = floor(elapsed_sec / 300) + 1,
+    Elapsed_second_epoch = elapsed_sec %% 300,
+    Event_Epoch = paste0(Event, "_", epoch_5min)
+  ) %>%
+  group_by(ID, Event_Epoch) %>%
+  filter(
+    max(Elapsed_second_epoch) >= 214) %>%
+  ungroup()
+  
+
+#5. Compute Mean per Epoch 
+Polar_HR_Epochs <- Polar_HR_Epochs %>% 
+   group_by(ID, Event_Epoch) %>% 
+  summarise(
+   
+     # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    Event = first(Event),
+   
+    # Number of observations
+    N_HR = n(),
+    
+     # Quotient
+    HR_Quo = round(mean(HR_Quo, na.rm = TRUE), 2),
+    
+    # HR
+    HR = round(mean(HR, na.rm = TRUE)),
+    
+    .groups = "drop")
+  
+
+```
+
+# 7. Time-based Measures
+
+## 7.1 For Empatica 
+
+```{r time-based-measures-empatica}
+
+# Create 5-Min Epochs per Event
+Empatica_Epoch <- Empatica_RR_Imputed %>% 
+ group_by(ID, Session, Event) %>% 
+  arrange(timestamp, .by_group = TRUE) %>%
+  mutate(
+    event_start = min(timestamp),
+    elapsed_sec = as.numeric(timestamp - event_start),
+    epoch_5min = floor(elapsed_sec / 301) + 1,
+    Elapsed_second_epoch = elapsed_sec %% 301,
+    Event_Epoch = paste0(Event, "_", epoch_5min)
+  ) %>%
+  group_by(ID, Event_Epoch) %>%
+  filter(
+    max(Elapsed_second_epoch) >= 214) %>%
+  ungroup()
+
+ Check <- Empatica_Epoch %>% distinct(ID, Event_Epoch)
+
+
+#Compute Timebased-metrics per Epoch
+Empatica_Timebased_Epoch <- Empatica_Epoch %>% 
+     group_by(ID, Event_Epoch) %>% 
+  summarise(
+    
+    # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    Event = first(Event), 
+    
+    #Count RR
+    N_RR = n(),
+    
+    # SDNN
+    SDNN = round(sd(EWMA_RR, na.rm = TRUE), 2),
+    
+    # log SDNN
+    lnSDNN = round(log(
+      sd(EWMA_RR, na.rm = TRUE)
+    ), 3),
+    
+    # RMSSD
+    RMSSD = round(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      ),
+      2
+    ),
+    
+    # log RMSSD
+    lnRMSSD = round(log(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      )
+    ), 3),
+
+    
+    .groups = "drop"
+  ) 
+
+```
+
+## 7.2 For Polar 
+
+```{r time-based-measures-empatica}
+
+#Create 5minutes epoch per event 
+Polar_Epoch <- Polar_RR_Imputed %>%
+  group_by(ID, Session, Event) %>%
+  arrange(Timestamp, .by_group = TRUE) %>%
+  mutate(
+    event_start = min(Timestamp),
+    elapsed_sec = as.numeric(Timestamp - event_start),
+    epoch_5min = floor(elapsed_sec / 301) + 1,
+    Elapsed_second_epoch = elapsed_sec %% 301,
+    Event_Epoch = paste0(Event, "_", epoch_5min)
+  ) %>%
+  group_by(ID, Event_Epoch) %>%
+  filter(max(Elapsed_second_epoch) >= 214)%>%
+  ungroup()
+
+ Check <- Polar_Epoch %>% distinct(ID, Event_Epoch)
+
+#Compute Timebased-metrics per Epoch
+Polar_Timebased_Epoch <- Polar_Epoch %>% 
+     group_by(ID, Event_Epoch) %>% 
+  summarise(
+    
+    # Keep participant info
+    Session = first(Session),
+    Color = first(Color),
+    Station = first(Station),
+    Group = first(Group), 
+    Type = first(Type), 
+    Event = first(Event),
+    
+    #Count RR
+    N_RR = n(),
+    
+    # SDNN
+    SDNN = round(sd(EWMA_RR, na.rm = TRUE), 2),
+    
+    # log SDNN
+    lnSDNN = round(log(
+      sd(EWMA_RR, na.rm = TRUE)
+    ), 3),
+    
+    # RMSSD
+    RMSSD = round(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      ),
+      2
+    ),
+    
+    # log RMSSD
+    lnRMSSD = round(log(
+      sqrt(
+        mean(
+          diff(EWMA_RR)^2,
+          na.rm = TRUE
+        )
+      )
+    ), 3),
+
+    
+    .groups = "drop"
+  ) 
+
+# Test: lnRMSSD_Quo
+
+# 1. Mean baseline lnRMSSD per participant
+Polar_Base_lnRMSSD <- Polar_Timebased_Epoch %>%
+  filter(Event == "Baseline") %>%
+  group_by(ID) %>%
+  summarise(
+    Base_lnRMSSD = mean(lnRMSSD, na.rm = TRUE),
+    Base_RMSSD = mean(RMSSD, na.rm = TRUE), 
+    .groups = "drop"
+  )
+
+# 2. Join baseline to all epochs
+Polar_Timebased_Epoch <- Polar_Timebased_Epoch %>%
+  left_join(Polar_Base_lnRMSSD, by = "ID")
+
+# 3. Compute quotient
+Polar_Timebased_Epoch <- Polar_Timebased_Epoch %>%
+  mutate(
+    lnRMSSD_Quo = (lnRMSSD - Base_lnRMSSD) / Base_lnRMSSD, 
+    RMSSD_Quo = (RMSSD - Base_RMSSD) / Base_RMSSD
+  )
+
+
+```
+
+# 8. Frequency-based Measures
+
+Done in Python
+
+Export RR Data 
+
+```{r export-RR-data}
+#Set WD
+setwd("./Preprocessed_Data")
+
+#Export Imputed Timeseries 
+write_xlsx(Empatica_Epoch, "Empatica_Epoch.xlsx")
+write_xlsx(Polar_Epoch, "Polar_Epoch.xlsx")
+
+```
+
+
+Import from Python :)
+
+```{r import-hrv-data-from-python}
+
+setwd("./Preprocessed_Data")
+
+#Empatica
+Empatica_Frequency_HRV <- read_excel("Empatica_Frequency_HRV.xlsx")
+view(Empatica_Frequency_HRV)
+#Polar
+Polar_Frequency_HRV <- read_excel("Polar_Frequency_HRV.xlsx")
+
+```
+
+# 9.  Unify Aggregated Data 
+
+## HRV Metrics 
+
+```{r unify-aggregated-data-rr}
+
+#Empatica
+HRV_Summary_Empatica <- Empatica_Timebased_Epoch %>% 
+  left_join(Empatica_Frequency_HRV, by =c("ID", "Event_Epoch")) %>% 
+  rename_with(
+    ~ paste0(., "_Empatica"),
+    .cols = c(SDNN, lnSDNN, RMSSD, lnRMSSD, N_RR, HRV_LF, HRV_HF, HRV_LFHF, HRV_HFn, HRV_LFn ))  %>% 
+  dplyr::select(-c(14,15,18,19,23))
+
+
+#Polar
+HRV_Summary_Polar <- Polar_Timebased_Epoch %>%
+  left_join(Polar_Frequency_HRV, by =c("ID", "Event_Epoch")) %>% 
+  rename_with(
+    ~ paste0(., "_Polar"),
+    .cols = c(SDNN, lnSDNN, RMSSD, lnRMSSD, lnRMSSD_Quo, RMSSD_Quo , N_RR, HRV_LF, HRV_HF, HRV_LFHF,HRV_HFn, HRV_LFn))   %>% 
+  dplyr::select(-c(14,15,18,19,23))
+
+
+#Join both Devices 
+HRV_Comparison <- HRV_Summary_Empatica %>% 
+  left_join(HRV_Summary_Polar, by=c("ID", "Event", "Event_Epoch", "Group", "Session", "Color", "Station", "Type"))
+
+```
+
+## HR Metrics 
+
+```{r unify-aggregated-data-hr}
+
+#Empatica
+HR_Summary_Empatica <- Empatica_HR_Epochs %>%
+  rename_with(
+    ~ paste0(., "_Empatica"),
+    .cols = c(HR_Quo,HR, N_HR)
+  )
+
+
+#Polar
+HR_Summary_Polar <- Polar_HR_Epochs %>%
+  rename_with(
+    ~ paste0(., "_Polar"),
+    .cols = c(HR_Quo,HR, N_HR)
+  )
+
+
+
+#Join both Devices 
+HR_Comparison <- HR_Summary_Empatica %>% 
+  left_join(HR_Summary_Polar, by=c("ID", "Event", "Event_Epoch", "Group", "Session", "Color", "Station", "Type"))
+
+
+
+```
+
+## Create Cardio Summary 
+
+```{r cardio-summary-}
+
+#Join 
+Cardio_Comparison <- data.frame()
+Cardio_Comparison <- HRV_Comparison %>% 
+  left_join(HR_Comparison, by=c("ID", "Event", "Event_Epoch", "Group", "Session", "Color",
+                                "Station", "Type"))
+
+```
+
+
+# 10. Export Data 
+
+## 10.1 Create a new grouping variable
+
+```{r}
+
+#Cardio_Comparison
+Cardio_Comparison <- Cardio_Comparison %>%
+  mutate(
+    Event_Phase = case_when(
+      Event %in% c("Trial1", "Trial2", "Trial3", "Video") ~ "Trials",
+      TRUE ~ Event) ) 
+
+
+#Empatica RR Imputed
+Empatica_RR_Imputed <- Empatica_RR_Imputed %>%
+  mutate(
+    Event_Phase = case_when(
+      Event %in% c("Trial1", "Trial2", "Trial3", "Video") ~ "Trials",
+      TRUE ~ Event) ) 
+
+#Empatica_HR
+Empatica_HR <- Empatica_HR %>%
+  mutate(
+    Event_Phase = case_when(
+      Event %in% c("Trial1", "Trial2", "Trial3", "Video") ~ "Trials",
+      TRUE ~ Event) ) 
+
+#Polar RR Imputed
+Polar_RR_Imputed <- Polar_RR_Imputed %>%
+  mutate(
+    Event_Phase = case_when(
+      Event %in% c("Trial1", "Trial2", "Trial3", "Video") ~ "Trials",
+      TRUE ~ Event) ) 
+
+#Polar_HR
+Polar_HR <- Polar_HR %>%
+  mutate(
+    Event_Phase = case_when(
+      Event %in% c("Trial1", "Trial2", "Trial3", "Video") ~ "Trials",
+      TRUE ~ Event) ) 
+
+```
+
+## 10.2 Aggregated Values and Imputed Timeseries
+
+```{r export-aggregated values}
+
+# Set Directory 
+setwd("./Preprocessed_Data")
+
+
+## Aggregated Dataset 
+write_xlsx(Cardio_Comparison, "Cardio_Comparison.xlsx")
+
+## Timeseries
+write_xlsx(Empatica_RR_Imputed, "Empatica_RR_Imputed.xlsx")
+write_xlsx(Empatica_HR, "Empatica_HR.xlsx")
+write_xlsx(Polar_RR_Imputed, "Polar_RR_Imputed.xlsx")
+write_xlsx(Polar_HR, "Polar_HR.xlsx")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

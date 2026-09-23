@@ -1,0 +1,25 @@
+# Raw data hosted on Figshare
+CVA/CVA_Empatica/
+CVA/CVA_Reference/
+EDA/EDA_Empatica/
+EDA/EDA_Reference/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+renv/staging/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Office lock files
+~$*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
